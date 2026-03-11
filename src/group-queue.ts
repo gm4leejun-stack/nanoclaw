@@ -1,9 +1,10 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
+import { stopContainer } from './container-runtime.js';
 
 interface QueuedTask {
   id: string;
@@ -191,6 +192,30 @@ export class GroupQueue {
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * Force-stop the active Docker container for a group (used by /new command).
+   * The container process will exit, queue state resets automatically via the
+   * existing exit handler in runForGroup.
+   */
+  killContainer(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    if (!state.containerName) return;
+    const name = state.containerName;
+    exec(stopContainer(name), { timeout: 10000 }, (err) => {
+      if (err) {
+        logger.warn(
+          { groupJid, containerName: name, err },
+          'killContainer: docker stop failed',
+        );
+      } else {
+        logger.info(
+          { groupJid, containerName: name },
+          'killContainer: container stopped',
+        );
+      }
+    });
   }
 
   private async runForGroup(

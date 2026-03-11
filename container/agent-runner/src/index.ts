@@ -391,12 +391,34 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // Read CLAUDE.md fresh before each query so updates take effect on the next message
+  const claudeMdPath = path.join(process.env.HOME || '/home/node', '.claude', 'CLAUDE.md');
+  const claudeMd = fs.existsSync(claudeMdPath)
+    ? fs.readFileSync(claudeMdPath, 'utf-8')
+    : '';
+  if (claudeMd) log(`Loaded CLAUDE.md (${claudeMd.length} chars)`);
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
+
+  // Load skill prompts from /workspace/group/.skills/
+  const skillsDir = '/workspace/group/.skills';
+  let skillPrompts = '';
+  if (fs.existsSync(skillsDir)) {
+    const skillFiles = fs.readdirSync(skillsDir).filter(f => f.endsWith('.md')).sort();
+    for (const file of skillFiles) {
+      const content = fs.readFileSync(path.join(skillsDir, file), 'utf-8');
+      skillPrompts += '\n\n' + content;
+      log(`Loaded skill: ${file}`);
+    }
+  }
+
+  const systemAppend = [claudeMd, globalClaudeMd, skillPrompts]
+    .filter(Boolean).join('\n\n---\n\n') || undefined;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -421,8 +443,8 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+      systemPrompt: systemAppend
+        ? { type: 'preset' as const, preset: 'claude_code' as const, append: systemAppend }
         : undefined,
       allowedTools: [
         'Bash',
@@ -475,8 +497,44 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      const res = message as { result?: string; usage?: { input_tokens?: number; output_tokens?: number } };
+      const textResult = res.result || null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+
+      // Append usage to SQLite (shared) + per-group JSONL (legacy compat)
+      const inTokens = res.usage?.input_tokens ?? 0;
+      const outTokens = res.usage?.output_tokens ?? 0;
+      if (inTokens > 0 || outTokens > 0) {
+        try {
+          const ts = new Date().toISOString();
+          const container = containerInput.groupFolder;
+          const sharedUsageDir = '/workspace/shared/usage';
+          fs.mkdirSync(sharedUsageDir, { recursive: true });
+          // Write to SQLite
+          const { DatabaseSync } = await import('node:sqlite');
+          const db = new DatabaseSync(path.join(sharedUsageDir, 'usage.db'));
+          db.exec(`CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            container TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL
+          )`);
+          db.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
+          db.prepare('INSERT INTO usage (ts, container, input_tokens, output_tokens) VALUES (?,?,?,?)')
+            .run(ts, container, inTokens, outTokens);
+          db.close();
+          // Legacy JSONL (backward compat)
+          const entry = JSON.stringify({ ts, in: inTokens, out: outTokens, total: inTokens + outTokens }) + '\n';
+          fs.appendFileSync(path.join(sharedUsageDir, `${container}.json`), entry);
+          fs.mkdirSync('/workspace/group/data', { recursive: true });
+          fs.appendFileSync('/workspace/group/data/usage.json', entry);
+        } catch (err) {
+          log(`Failed to write usage: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       writeOutput({
         status: 'success',
         result: textResult || null,

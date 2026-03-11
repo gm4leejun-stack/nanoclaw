@@ -3,6 +3,7 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
@@ -31,6 +32,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  deleteSession,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -158,6 +160,132 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   if (missedMessages.length === 0) return true;
+
+  // Fast path: "token用量" — aggregate stats across all groups from shared usage dir
+  const lastContent = missedMessages[missedMessages.length - 1].content.trim();
+  if (
+    lastContent === 'token用量' ||
+    lastContent === 'token使用量' ||
+    lastContent === 'token消耗'
+  ) {
+    try {
+      const sharedUsageDir = path.join(DATA_DIR, 'shared', 'usage');
+      const now = new Date();
+      const todayStr = now.toISOString().slice(0, 10);
+      const weekAgo = new Date(
+        now.getTime() - 7 * 24 * 3600 * 1000,
+      ).toISOString();
+      const monthAgo = new Date(
+        now.getTime() - 30 * 24 * 3600 * 1000,
+      ).toISOString();
+
+      type Stats = {
+        dayIn: number;
+        dayOut: number;
+        weekIn: number;
+        weekOut: number;
+        monthIn: number;
+        monthOut: number;
+      };
+      const zero = (): Stats => ({
+        dayIn: 0,
+        dayOut: 0,
+        weekIn: 0,
+        weekOut: 0,
+        monthIn: 0,
+        monthOut: 0,
+      });
+      const accumulate = (s: Stats, lines: string[]) => {
+        for (const line of lines) {
+          try {
+            const e = JSON.parse(line) as {
+              ts: string;
+              in: number;
+              out: number;
+            };
+            if (e.ts >= monthAgo) {
+              s.monthIn += e.in;
+              s.monthOut += e.out;
+            }
+            if (e.ts >= weekAgo) {
+              s.weekIn += e.in;
+              s.weekOut += e.out;
+            }
+            if (e.ts.startsWith(todayStr)) {
+              s.dayIn += e.in;
+              s.dayOut += e.out;
+            }
+          } catch {
+            /* skip malformed */
+          }
+        }
+      };
+
+      const files = fs.existsSync(sharedUsageDir)
+        ? fs.readdirSync(sharedUsageDir).filter((f) => f.endsWith('.json'))
+        : [];
+
+      const total = zero();
+      const perGroup: Array<{ name: string; s: Stats }> = [];
+
+      for (const file of files) {
+        const lines = fs
+          .readFileSync(path.join(sharedUsageDir, file), 'utf-8')
+          .trim()
+          .split('\n')
+          .filter(Boolean);
+        const s = zero();
+        accumulate(s, lines);
+        accumulate(total, lines);
+        perGroup.push({ name: file.replace(/\.json$/, ''), s });
+      }
+
+      // Fall back to this group's own file if shared dir is empty (migration period)
+      if (files.length === 0) {
+        const usagePath = path.join(
+          resolveGroupFolderPath(group.folder),
+          'data',
+          'usage.json',
+        );
+        if (fs.existsSync(usagePath)) {
+          const lines = fs
+            .readFileSync(usagePath, 'utf-8')
+            .trim()
+            .split('\n')
+            .filter(Boolean);
+          accumulate(total, lines);
+          perGroup.push({ name: group.folder, s: { ...total } });
+        }
+      }
+
+      const fmt = (i: number, o: number) =>
+        `输入 ${i.toLocaleString()} + 输出 ${o.toLocaleString()} = **${(i + o).toLocaleString()}**`;
+      const lines: string[] = [`📊 *全局 Token 用量统计*\n`];
+      lines.push(`**总计**`);
+      lines.push(`今日：${fmt(total.dayIn, total.dayOut)}`);
+      lines.push(`本周：${fmt(total.weekIn, total.weekOut)}`);
+      lines.push(`近30天：${fmt(total.monthIn, total.monthOut)}`);
+
+      if (perGroup.length > 1) {
+        lines.push(`\n**各群组（近30天）**`);
+        for (const { name, s } of perGroup.sort(
+          (a, b) => b.s.monthIn + b.s.monthOut - (a.s.monthIn + a.s.monthOut),
+        )) {
+          const t = s.monthIn + s.monthOut;
+          if (t > 0) lines.push(`• ${name}：${t.toLocaleString()}`);
+        }
+      }
+
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      await channel.sendMessage(chatJid, lines.join('\n'));
+      return true;
+    } catch (err) {
+      logger.warn({ err }, 'Failed to compute token usage stats');
+      // Fall through to container agent on error
+    }
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -505,6 +633,33 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onResetSession: (chatJid: string) => {
+      const group = registeredGroups[chatJid];
+      if (!group) return;
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      queue.closeStdin(chatJid);
+      queue.killContainer(chatJid);
+      // Delete the per-group agent-runner-src so next container startup
+      // re-copies from container/agent-runner/src, picking up latest code.
+      const agentRunnerDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        'agent-runner-src',
+      );
+      if (fs.existsSync(agentRunnerDir)) {
+        fs.rmSync(agentRunnerDir, { recursive: true, force: true });
+        logger.info(
+          { chatJid, group: group.name, agentRunnerDir },
+          '/new: agent-runner-src removed for fresh copy',
+        );
+      }
+      logger.info(
+        { chatJid, group: group.name },
+        '/new: session reset + container killed',
+      );
+    },
   };
 
   // Create and connect all registered channels.

@@ -188,12 +188,21 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true, force: true });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
+    readonly: false,
+  });
+
+  // Shared data directory — all groups can write usage stats here
+  const sharedDir = path.join(DATA_DIR, 'shared');
+  fs.mkdirSync(path.join(sharedDir, 'usage'), { recursive: true });
+  mounts.push({
+    hostPath: sharedDir,
+    containerPath: '/workspace/shared',
     readonly: false,
   });
 
@@ -220,6 +229,7 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
+    'GITHUB_TOKEN',
   ]);
 }
 

@@ -64,7 +64,8 @@ interface TokenOptState {
   lastInjectedOutputAvg: number;      // 上次注入时的 output 均值（用于自优化）
 }
 
-const TOKEN_OPT_STATE_FILE = '/workspace/shared/token-opt-state.json';
+const WORKSPACE_DIR = process.env.NANOCLAW_WORKSPACE || '/workspace';
+const TOKEN_OPT_STATE_FILE = `${WORKSPACE_DIR}/shared/token-opt-state.json`;
 const COMPACTION_THRESHOLD_BYTES = 80 * 1024;             // 80KB
 const CONSTRAINT_PERIOD_TOKENS = 20000;                   // 条件一：每 20000 input token 注入一次（约阈值的1/2）
 const OUTPUT_WINDOW_SIZE = 10;                            // 近期 output token 滑动窗口大小
@@ -91,7 +92,7 @@ function loadTokenOptState(): TokenOptState {
 
 function saveTokenOptState(state: TokenOptState): void {
   try {
-    fs.mkdirSync('/workspace/shared', { recursive: true });
+    fs.mkdirSync(`${WORKSPACE_DIR}/shared`, { recursive: true });
     fs.writeFileSync(TOKEN_OPT_STATE_FILE, JSON.stringify(state, null, 2));
   } catch { /* ignore */ }
 }
@@ -100,7 +101,7 @@ function saveTokenOptState(state: TokenOptState): void {
  * 获取 transcript 文件大小（bytes）。
  * transcript 在 ~/.claude/projects/ 下，通过 sessionId 找对应文件。
  */
-function getTranscriptSize(sessionId?: string): number {
+export function getTranscriptSize(sessionId?: string): number {
   if (!sessionId) return 0;
   try {
     const claudeDir = path.join(process.env.HOME || '/home/node', '.claude', 'projects');
@@ -120,7 +121,7 @@ function getTranscriptSize(sessionId?: string): number {
  * 从已有 seed 文件中加载上次的 compact summary（增量合并用）。
  */
 function loadExistingSeed(groupFolder: string): string {
-  const seedPath = `/workspace/group/.compact-seed.md`;
+  const seedPath = `${WORKSPACE_DIR}/group/.compact-seed.md`;
   try {
     if (fs.existsSync(seedPath)) {
       return fs.readFileSync(seedPath, 'utf-8');
@@ -134,7 +135,7 @@ function loadExistingSeed(groupFolder: string): string {
  */
 function writeCompactSeed(summary: string): void {
   try {
-    fs.writeFileSync('/workspace/group/.compact-seed.md', summary, 'utf-8');
+    fs.writeFileSync(`${WORKSPACE_DIR}/group/.compact-seed.md`, summary, 'utf-8');
   } catch (err) {
     log(`Failed to write compact seed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -143,7 +144,7 @@ function writeCompactSeed(summary: string): void {
 /**
  * 从 assistant 回复文本中提取 <compact_summary>...</compact_summary>。
  */
-function extractCompactSummary(text: string): string | null {
+export function extractCompactSummary(text: string): string | null {
   const match = text.match(/<compact_summary>([\s\S]*?)<\/compact_summary>/);
   return match ? match[1].trim() : null;
 }
@@ -151,7 +152,7 @@ function extractCompactSummary(text: string): string | null {
 /**
  * 从 assistant 回复文本中提取 <compressed_claudemd>...</compressed_claudemd>。
  */
-function extractCompressedClaudeMd(text: string): string | null {
+export function extractCompressedClaudeMd(text: string): string | null {
   const match = text.match(/<compressed_claudemd>([\s\S]*?)<\/compressed_claudemd>/);
   return match ? match[1].trim() : null;
 }
@@ -160,7 +161,7 @@ function extractCompressedClaudeMd(text: string): string | null {
  * 零 token 结构化验证：检查压缩后的 CLAUDE.md 是否保留了所有约束规则行。
  * 规则行 = 包含约束关键词的行。
  */
-function validateCompressedClaudeMd(original: string, compressed: string): { valid: boolean; missing: string[] } {
+export function validateCompressedClaudeMd(original: string, compressed: string): { valid: boolean; missing: string[] } {
   const constraintKeywords = ['禁止', '必须', '不能', '不许', '不得', '需要', '要求', '强制'];
   const missing: string[] = [];
   for (const line of original.split('\n')) {
@@ -220,7 +221,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_INPUT_DIR = `${WORKSPACE_DIR}/ipc/input`;
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
@@ -331,7 +332,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = `${WORKSPACE_DIR}/group/conversations`;
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -495,7 +496,7 @@ function waitForIpcMessage(): Promise<string | null> {
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
-async function runQuery(
+export async function runQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
@@ -572,14 +573,14 @@ async function runQuery(
   }
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const globalClaudeMdPath = `${WORKSPACE_DIR}/global/CLAUDE.md`;
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
   // Load skill prompts from /workspace/group/.skills/
-  const skillsDir = '/workspace/group/.skills';
+  const skillsDir = `${WORKSPACE_DIR}/group/.skills`;
   let skillPrompts = '';
   if (fs.existsSync(skillsDir)) {
     const skillFiles = fs.readdirSync(skillsDir).filter(f => f.endsWith('.md')).sort();
@@ -651,7 +652,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
+  const extraBase = `${WORKSPACE_DIR}/extra`;
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
       const fullPath = path.join(extraBase, entry);
@@ -735,7 +736,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
         try {
           const ts = new Date().toISOString();
           const container = containerInput.groupFolder;
-          const sharedUsageDir = '/workspace/shared/usage';
+          const sharedUsageDir = `${WORKSPACE_DIR}/shared/usage`;
           fs.mkdirSync(sharedUsageDir, { recursive: true });
           // Write to SQLite
           const { DatabaseSync } = await import('node:sqlite');
@@ -745,18 +746,58 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             ts TEXT NOT NULL,
             container TEXT NOT NULL,
             input_tokens INTEGER NOT NULL,
-            output_tokens INTEGER NOT NULL
+            output_tokens INTEGER NOT NULL,
+            session_id TEXT,
+            model TEXT,
+            group_id TEXT NOT NULL DEFAULT '',
+            transcript_size_bytes INTEGER NOT NULL DEFAULT 0,
+            seed_size_bytes INTEGER NOT NULL DEFAULT 0,
+            claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+            claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
+            m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
+            m1_seed_used INTEGER NOT NULL DEFAULT 0,
+            m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
+            m3_compress_injected INTEGER NOT NULL DEFAULT 0,
+            m1_summary_extracted INTEGER NOT NULL DEFAULT 0,
+            m3_compress_applied INTEGER NOT NULL DEFAULT 0,
+            m3_validation_passed INTEGER NOT NULL DEFAULT 0,
+            output_multiplier REAL NOT NULL DEFAULT 1.5,
+            output_rolling_avg REAL NOT NULL DEFAULT 0
           )`);
+          const NEW_COLUMNS = [
+            "session_id TEXT",
+            "model TEXT",
+            "group_id TEXT NOT NULL DEFAULT ''",
+            "transcript_size_bytes INTEGER NOT NULL DEFAULT 0",
+            "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
+            "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+            "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
+            "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
+            "m1_seed_used INTEGER NOT NULL DEFAULT 0",
+            "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
+            "m3_compress_injected INTEGER NOT NULL DEFAULT 0",
+            "m1_summary_extracted INTEGER NOT NULL DEFAULT 0",
+            "m3_compress_applied INTEGER NOT NULL DEFAULT 0",
+            "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
+            "output_multiplier REAL NOT NULL DEFAULT 1.5",
+            "output_rolling_avg REAL NOT NULL DEFAULT 0",
+          ];
+          for (const col of NEW_COLUMNS) {
+            try { db.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
+          }
           db.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
           db.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_group_id ON usage(group_id)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_session  ON usage(session_id)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_model    ON usage(model)');
           db.prepare('INSERT INTO usage (ts, container, input_tokens, output_tokens) VALUES (?,?,?,?)')
             .run(ts, container, inTokens, outTokens);
           db.close();
           // Legacy JSONL (backward compat)
           const entry = JSON.stringify({ ts, in: inTokens, out: outTokens, total: inTokens + outTokens }) + '\n';
           fs.appendFileSync(path.join(sharedUsageDir, `${container}.json`), entry);
-          fs.mkdirSync('/workspace/group/data', { recursive: true });
-          fs.appendFileSync('/workspace/group/data/usage.json', entry);
+          fs.mkdirSync(`${WORKSPACE_DIR}/group/data`, { recursive: true });
+          fs.appendFileSync(`${WORKSPACE_DIR}/group/data/usage.json`, entry);
         } catch (err) {
           log(`Failed to write usage: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -798,7 +839,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             log(`[token-opt] CLAUDE.md compression validation FAILED, missing rules: ${missing.slice(0, 3).join(' | ')}${missing.length > 3 ? '...' : ''}`);
             // 写入日志文件供人工检查
             try {
-              const logDir = '/workspace/group/logs';
+              const logDir = `${WORKSPACE_DIR}/group/logs`;
               fs.mkdirSync(logDir, { recursive: true });
               const logEntry = JSON.stringify({ ts: new Date().toISOString(), missing }) + '\n';
               fs.appendFileSync(path.join(logDir, 'claudemd-compress-failures.log'), logEntry);
@@ -914,4 +955,7 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// Only run main() when executed directly (not imported by tests)
+if (process.env.NANOCLAW_TEST !== '1') {
+  main();
+}

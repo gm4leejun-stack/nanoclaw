@@ -229,8 +229,8 @@ gh auth login -h github.com
 
 | 机制 | 说明 | 额外成本 |
 |------|------|----------|
-| Inline Compaction | 对话超 80KB 时自动压缩历史，下次 session 轻装启动 | ~300 output token |
-| 响应长度控制 | 动态注入简洁性约束，抑制 output 漂移 | ~30 token/次 |
-| CLAUDE.md 自动压缩 | CLAUDE.md 超 10KB 时自动 inline 压缩，永久减少 system prompt | 0 额外成本 |
+| Inline Compaction | 对话超 80KB 时，**当轮**注入压缩指令，Claude 顺带输出摘要；下次 session 以摘要启动，丢弃完整历史 | ~300 output token（摘要本身） |
+| 响应长度控制 | 每轮调用动态判断（周期保底 + 漂移检测），满足条件则注入简洁性约束 | ~30 token/次注入 |
+| CLAUDE.md 动态压缩 | 每轮调用检查 CLAUDE.md 大小，超 10KB 则**当轮**注入压缩指令；验证通过后原地覆盖，缩小后自动停止触发 | 0 额外成本 |
 
 详细设计见 [TOKEN-OPTIMIZATION.md](TOKEN-OPTIMIZATION.md)。

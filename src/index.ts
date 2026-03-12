@@ -433,6 +433,18 @@ async function runAgent(
       }
     : undefined;
 
+  // 机制一：新 session 时读取 compact seed 文件
+  let compactSeed: string | undefined;
+  if (!sessionId) {
+    const seedPath = path.join(resolveGroupFolderPath(group.folder), '.compact-seed.md');
+    if (fs.existsSync(seedPath)) {
+      try {
+        compactSeed = fs.readFileSync(seedPath, 'utf-8');
+        logger.debug({ group: group.name }, '[token-opt] Loaded compact seed for new session');
+      } catch { /* ignore */ }
+    }
+  }
+
   try {
     const output = await runContainerAgent(
       group,
@@ -443,6 +455,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        compactSeed,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

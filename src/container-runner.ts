@@ -191,12 +191,24 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  // Always sync from source so container picks up the latest agent-runner code.
+  // Per-group copy allows agents to customize their own runner without affecting others.
+  if (fs.existsSync(agentRunnerSrc)) {
+    fs.mkdirSync(groupAgentRunnerDir, { recursive: true });
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true, force: true });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
+    readonly: false,
+  });
+
+  // Shared data directory: usage stats, token-opt state (readable/writable by all containers)
+  const sharedDataDir = path.join(DATA_DIR, 'shared');
+  fs.mkdirSync(sharedDataDir, { recursive: true });
+  mounts.push({
+    hostPath: sharedDataDir,
+    containerPath: '/workspace/shared',
     readonly: false,
   });
 

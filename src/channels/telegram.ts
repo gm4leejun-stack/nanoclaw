@@ -272,6 +272,17 @@ export class TelegramChannel implements Channel {
           console.log(
             `  Send /chatid to the bot to get a chat's registration ID\n`,
           );
+          // Register commands so they appear in Telegram's / menu
+          this.bot!.api
+            .setMyCommands([
+              { command: 'new', description: '开始新对话（清除上下文）' },
+              { command: 'opt', description: '测试 Token 优化机制' },
+              { command: 'ping', description: '检查 bot 是否在线' },
+              { command: 'chatid', description: '获取当前 Chat ID' },
+            ])
+            .catch((err) =>
+              logger.warn({ err }, 'Failed to register bot commands'),
+            );
           resolve();
         },
       });

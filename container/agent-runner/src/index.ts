@@ -771,6 +771,43 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
           cleanResult = textResult.replace(/<compact_summary>[\s\S]*?<\/compact_summary>/g, '').trim();
         } else {
           log(`[token-opt] M1: no <compact_summary> in reply (compactInstruction was injected into prompt)`);
+          // Fallback: run a dedicated compaction query
+          log('[token-opt] M1: running dedicated fallback compaction query');
+          try {
+            const fbStream = new MessageStream();
+            fbStream.push(compactInstruction.trim());
+            fbStream.end();
+            let fbText = '';
+            for await (const fbMsg of query({
+              prompt: fbStream,
+              options: {
+                cwd: '/workspace/group',
+                resume: newSessionId || sessionId,
+                systemPrompt: undefined,
+                allowedTools: [],
+                maxTurns: 1,
+                permissionMode: 'bypassPermissions' as const,
+                allowDangerouslySkipPermissions: true,
+                settingSources: ['project', 'user'] as const,
+              },
+            })) {
+              if (fbMsg.type === 'result') {
+                const fbRes = fbMsg as { result?: string };
+                fbText = fbRes.result || '';
+              }
+            }
+            const fbSummary = extractCompactSummary(fbText);
+            if (fbSummary) {
+              writeCompactSeed(fbSummary);
+              summaryWasWritten = true;
+              compactStats = { transcriptBytes: transcriptSize, seedBytes: Buffer.byteLength(fbSummary, 'utf-8') };
+              log(`[token-opt] M1: fallback compaction succeeded, seed written (${fbSummary.length} chars)`);
+            } else {
+              log('[token-opt] M1: fallback compaction also produced no summary, skipping');
+            }
+          } catch (fbErr) {
+            log(`[token-opt] M1: fallback compaction error: ${fbErr}`);
+          }
         }
       }
 
@@ -1048,7 +1085,7 @@ async function main(): Promise<void> {
         const testM1Used = parseInt(process.env.NANOCLAW_OPT_M1_THRESHOLD || '0');
         const testM2Used = parseInt(process.env.NANOCLAW_OPT_M2_PERIOD || '0');
         const testM3Used = parseInt(process.env.NANOCLAW_OPT_M3_THRESHOLD || '0');
-        const m1Triggered = optInitState.transcriptBytes > 0 && optInitState.transcriptBytes > testM1Used;
+        const m1Triggered = seedAfter.length > 0 && seedAfter !== optInitState.seedBefore;
         const m2Triggered = (stateAfter.lastConstraintInjectedAt || 0) > optInitState.lastInjectAtBefore;
         const m3Triggered = optInitState.claudeMdBytes > 0 && optInitState.claudeMdBytes > testM3Used;
         const m1SeedBytes = Buffer.byteLength(seedAfter, 'utf-8');

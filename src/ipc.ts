@@ -12,6 +12,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<number | null | void>;
+  editMessage?: (jid: string, messageId: number, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -22,6 +23,25 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+}
+
+// 内存映射：(chatJid|statusKey) → { messageId, expiresAt }
+// TTL 10 分钟，防止泄漏
+const liveStatusMap = new Map<
+  string,
+  { messageId: number; expiresAt: number }
+>();
+const LIVE_STATUS_TTL_MS = 10 * 60 * 1000;
+
+function liveStatusKey(chatJid: string, statusKey: string): string {
+  return `${chatJid}|${statusKey}`;
+}
+
+function purgeLiveStatusExpired(): void {
+  const now = Date.now();
+  for (const [k, v] of liveStatusMap.entries()) {
+    if (v.expiresAt <= now) liveStatusMap.delete(k);
+  }
 }
 
 let ipcWatcherRunning = false;
@@ -73,6 +93,56 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // live_status: 动态状态消息（首次发送，后续编辑同一条）
+              if (
+                data.type === 'live_status' &&
+                data.chatJid &&
+                data.text &&
+                data.statusKey
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  purgeLiveStatusExpired();
+                  const key = liveStatusKey(data.chatJid, data.statusKey);
+                  const existing = liveStatusMap.get(key);
+                  if (existing) {
+                    // 编辑现有消息
+                    await deps.editMessage?.(
+                      data.chatJid,
+                      existing.messageId,
+                      data.text,
+                    );
+                    // 刷新 TTL
+                    existing.expiresAt = Date.now() + LIVE_STATUS_TTL_MS;
+                  } else {
+                    // 首次：发送新消息并记录 ID
+                    const messageId = await deps.sendMessage(
+                      data.chatJid,
+                      data.text,
+                    );
+                    if (messageId !== null && messageId !== undefined) {
+                      liveStatusMap.set(key, {
+                        messageId: messageId as number,
+                        expiresAt: Date.now() + LIVE_STATUS_TTL_MS,
+                      });
+                    }
+                    logger.info(
+                      { chatJid: data.chatJid, key, messageId },
+                      'Live status message created',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized live_status IPC message blocked',
+                  );
+                }
+                fs.unlinkSync(filePath);
+                continue;
+              }
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];

@@ -41,13 +41,15 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
-  compactSeed?: string;   // 机制一：上次压缩摘要，用于新 session 启动时注入初始 context
+  compactSeed?: string; // 机制一：上次压缩摘要，用于新 session 启动时注入初始 context
 }
 
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
+  compacted?: boolean; // 本轮已生成 compact summary，宿主应清除 session
+  compactStats?: { transcriptBytes: number; seedBytes: number };
   error?: string;
 }
 
@@ -191,10 +193,14 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
+  // Always sync from source so container picks up the latest agent-runner code.
+  // Per-group copy allows agents to customize their own runner without affecting others.
   if (fs.existsSync(agentRunnerSrc)) {
+    fs.mkdirSync(groupAgentRunnerDir, { recursive: true });
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, {
       recursive: true,
       force: true,
+      filter: (src) => !src.endsWith('.test.ts'),
     });
   }
   mounts.push({
@@ -203,11 +209,11 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Shared data directory — all groups can write usage stats here
-  const sharedDir = path.join(DATA_DIR, 'shared');
-  fs.mkdirSync(path.join(sharedDir, 'usage'), { recursive: true });
+  // Shared data directory: usage stats, token-opt state (readable/writable by all containers)
+  const sharedDataDir = path.join(DATA_DIR, 'shared');
+  fs.mkdirSync(sharedDataDir, { recursive: true });
   mounts.push({
-    hostPath: sharedDir,
+    hostPath: sharedDataDir,
     containerPath: '/workspace/shared',
     readonly: false,
   });

@@ -424,7 +424,9 @@ async function runAgent(
 
   // Wrap onOutput to track session ID from streamed results
   let pendingCompactNotify = false;
-  let pendingCompactStats: { transcriptBytes: number; seedBytes: number } | undefined;
+  let pendingCompactStats:
+    | { transcriptBytes: number; seedBytes: number }
+    | undefined;
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {

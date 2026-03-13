@@ -31,10 +31,14 @@ function toMarkdownV2(text: string): string {
     const marker = useTriple ? '```' : '`';
     const startIdx = useTriple ? tripleIdx : singleIdx;
     // Escape plain text before the code span
-    if (startIdx > 0) parts.push(remaining.slice(0, startIdx).replace(SPECIAL, '\\$&'));
+    if (startIdx > 0)
+      parts.push(remaining.slice(0, startIdx).replace(SPECIAL, '\\$&'));
     // Find closing marker
     const closeIdx = remaining.indexOf(marker, startIdx + marker.length);
-    if (closeIdx === -1) { parts.push(remaining.slice(startIdx).replace(SPECIAL, '\\$&')); break; }
+    if (closeIdx === -1) {
+      parts.push(remaining.slice(startIdx).replace(SPECIAL, '\\$&'));
+      break;
+    }
     // Preserve code block content as-is
     parts.push(remaining.slice(startIdx, closeIdx + marker.length));
     remaining = remaining.slice(closeIdx + marker.length);

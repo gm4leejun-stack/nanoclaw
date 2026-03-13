@@ -51,6 +51,7 @@ export interface TelegramChannelOpts {
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
   onResetSession?: (chatJid: string) => void;
+  onOptTest?: (chatJid: string) => Promise<void>;
 }
 
 export class TelegramChannel implements Channel {

@@ -514,6 +514,46 @@ async function runAgent(
   }
 }
 
+async function runOptTest(chatJid: string): Promise<void> {
+  const group = registeredGroups[chatJid];
+  const ch = findChannel(channels, chatJid);
+  if (!group) {
+    await ch?.sendMessage(chatJid, '❌ 此群组未注册，无法执行测试。');
+    return;
+  }
+
+  await ch?.sendMessage(chatJid, '🔍 启动 Token 优化测试中...');
+
+  let testResult = '';
+
+  try {
+    const output = await runContainerAgent(
+      group,
+      {
+        prompt: '请简短回复："测试完成"。',
+        sessionId: sessions[group.folder],
+        groupFolder: group.folder,
+        chatJid,
+        isMain: group.isMain === true,
+        assistantName: ASSISTANT_NAME,
+        extraEnvVars: { NANOCLAW_OPT_TEST: '1' },
+      },
+      (_proc, _containerName) => {},
+      async (result) => {
+        if (result.result) testResult = result.result;
+      },
+    );
+
+    if (!testResult && output.result) testResult = output.result;
+    if (!testResult) testResult = '⚠️ 测试完成但无输出，请检查容器日志。';
+  } catch (err) {
+    logger.error({ error: err }, 'runOptTest failed');
+    testResult = `❌ 测试失败: ${String(err)}`;
+  }
+
+  await ch?.sendMessage(chatJid, testResult);
+}
+
 async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
@@ -717,6 +757,7 @@ async function main(): Promise<void> {
         '/new: session reset + container killed',
       );
     },
+    onOptTest: runOptTest,
   };
 
   // Create and connect all registered channels.

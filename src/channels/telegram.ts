@@ -312,7 +312,10 @@ export class TelegramChannel implements Channel {
             opts,
           );
         }
-        logger.info({ jid, length: text.length }, 'Telegram message sent (split)');
+        logger.info(
+          { jid, length: text.length },
+          'Telegram message sent (split)',
+        );
         return null;
       }
     } catch (err) {
@@ -321,7 +324,11 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async editMessage(jid: string, messageId: number, text: string): Promise<void> {
+  async editMessage(
+    jid: string,
+    messageId: number,
+    text: string,
+  ): Promise<void> {
     if (!this.bot) return;
     try {
       const numericId = jid.replace(/^tg:/, '');
@@ -332,7 +339,10 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, messageId }, 'Telegram message edited');
     } catch (err: any) {
       // 消息已过期或内容相同时 Telegram 返回 400，不视为严重错误
-      logger.warn({ jid, messageId, err: err?.message }, 'Failed to edit Telegram message');
+      logger.warn(
+        { jid, messageId, err: err?.message },
+        'Failed to edit Telegram message',
+      );
     }
   }
 

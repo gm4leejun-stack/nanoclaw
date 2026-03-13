@@ -1063,7 +1063,14 @@ async function main(): Promise<void> {
         }
         log('[OPT_TEST] Files restored to pre-test state');
 
-        const fmtK = (b: number) => `${(b / 1024).toFixed(1)} K`;
+        // 数字格式化工具
+        const addCommas = (n: string) => n.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        const fmtK = (b: number) => {
+          const [i, d] = (b / 1024).toFixed(1).split('.');
+          return `${addCommas(i)}.${d} K`;
+        };
+        const fmtTK = (t: number) => `${addCommas(Math.round(t / 1000).toString())} K`;
+        const fmtN = (n: number) => addCommas(Math.round(n).toString());
         const icon = (ok: boolean, skip: boolean) => skip ? '⏭️' : ok ? '✅' : '❌';
         const m1Skip = optInitState.transcriptBytes === 0;
         const m2Skip = optInitState.totalInputTokens === 0;
@@ -1075,14 +1082,14 @@ async function main(): Promise<void> {
           '📊 当前状态',
           `  Session: ${fmtK(optInitState.transcriptBytes)}${m1Skip ? ' (无会话)' : ''}`,
           `  CLAUDE.md: ${fmtK(optInitState.claudeMdBytes)}${m3Skip ? ' (不存在)' : ''}`,
-          `  累计 Input Token: ${optInitState.totalInputTokens.toLocaleString()}`,
+          `  历史消耗 Input: ${fmtTK(optInitState.totalInputTokens)}（该群组所有对话累计）`,
           '',
           '⚙️ 测试阈值 (min(当前×0.8, 真实阈值))',
-          `  M1: ${fmtK(testM1Used)} | M2: ${testM2Used.toLocaleString()} | M3: ${fmtK(testM3Used)}`,
+          `  M1: ${fmtK(testM1Used)} | M2: ${fmtN(testM2Used)} | M3: ${fmtK(testM3Used)}`,
           '',
-          `${icon(m1Triggered, m1Skip)} M1 Inline Compaction${m1Skip ? ' (跳过: 无会话)' : m1Triggered ? ` — 指令已注入 (seed ${fmtK(m1SeedBytes)})` : ' — 未触发'}`,
+          `${icon(m1Triggered, m1Skip)} M1 Inline Compaction${m1Skip ? ' (跳过: 无会话)' : m1Triggered ? ` — 指令已注入 (${fmtK(optInitState.transcriptBytes)} > ${fmtK(testM1Used)})` : ' — 未触发'}`,
           `${icon(m2Triggered, m2Skip)} M2 响应长度控制${m2Skip ? ' (跳过: 无 token 记录)' : m2Triggered ? ' — 约束已注入' : ' — 未触发'}`,
-          `${icon(m3Triggered, m3Skip)} M3 CLAUDE.md 压缩${m3Skip ? ' (跳过: 文件不存在)' : m3Triggered ? ` — 指令已注入 (${fmtK(optInitState.claudeMdBytes)})` : ' — 未触发'}`,
+          `${icon(m3Triggered, m3Skip)} M3 CLAUDE.md 压缩${m3Skip ? ' (跳过: 文件不存在)' : m3Triggered ? ` — 指令已注入 (${fmtK(optInitState.claudeMdBytes)} > ${fmtK(testM3Used)})` : ' — 未触发'}`,
           '',
           '📝 所有文件已恢复原状，真实会话未被修改',
         ].join('\n');

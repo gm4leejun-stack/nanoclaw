@@ -42,6 +42,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   compactSeed?: string; // 机制一：上次压缩摘要，用于新 session 启动时注入初始 context
+  extraEnvVars?: Record<string, string>; // 注入额外环境变量（如测试模式标志）
 }
 
 export interface ContainerOutput {
@@ -234,6 +235,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  extraEnvVars?: Record<string, string>,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -259,6 +261,13 @@ function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // 注入额外环境变量（如测试模式标志）
+  if (extraEnvVars) {
+    for (const [key, value] of Object.entries(extraEnvVars)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -297,7 +306,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, input.extraEnvVars);
 
   logger.debug(
     {

@@ -287,10 +287,10 @@ export class TelegramChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string): Promise<number | null> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
-      return;
+      return null;
     }
 
     try {
@@ -301,7 +301,9 @@ export class TelegramChannel implements Channel {
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
       if (mdText.length <= MAX_LENGTH) {
-        await this.bot.api.sendMessage(numericId, mdText, opts);
+        const sent = await this.bot.api.sendMessage(numericId, mdText, opts);
+        logger.info({ jid, length: text.length }, 'Telegram message sent');
+        return sent.message_id;
       } else {
         for (let i = 0; i < mdText.length; i += MAX_LENGTH) {
           await this.bot.api.sendMessage(
@@ -310,10 +312,27 @@ export class TelegramChannel implements Channel {
             opts,
           );
         }
+        logger.info({ jid, length: text.length }, 'Telegram message sent (split)');
+        return null;
       }
-      logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      return null;
+    }
+  }
+
+  async editMessage(jid: string, messageId: number, text: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const mdText = toMarkdownV2(text);
+      await this.bot.api.editMessageText(numericId, messageId, mdText, {
+        parse_mode: 'MarkdownV2' as const,
+      });
+      logger.info({ jid, messageId }, 'Telegram message edited');
+    } catch (err: any) {
+      // 消息已过期或内容相同时 Telegram 返回 400，不视为严重错误
+      logger.warn({ jid, messageId, err: err?.message }, 'Failed to edit Telegram message');
     }
   }
 

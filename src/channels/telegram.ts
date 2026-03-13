@@ -107,6 +107,26 @@ export class TelegramChannel implements Channel {
       ctx.reply('✅ 已开始新对话');
     });
 
+    // Token 优化测试命令
+    this.bot.command('opt', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const groups = this.opts.registeredGroups();
+      if (!groups[chatJid]) {
+        await ctx.reply('❌ 此群组未注册，请先注册后再使用 /opt。');
+        return;
+      }
+      if (!this.opts.onOptTest) {
+        await ctx.reply('⚠️ Token 优化测试功能未配置。');
+        return;
+      }
+      try {
+        await this.opts.onOptTest(chatJid);
+      } catch (err) {
+        logger.error({ error: err }, '/opt command failed');
+        await ctx.reply('❌ 测试执行失败，请查看服务日志。');
+      }
+    });
+
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;

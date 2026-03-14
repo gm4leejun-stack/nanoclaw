@@ -433,12 +433,14 @@ async function buildTokenStatsMessage(): Promise<string> {
 
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
-  const weekAgo  = new Date(now.getTime() - 7  * 24 * 3600 * 1000).toISOString();
-  const monthAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000).toISOString();
+  const monthAgo = new Date(
+    now.getTime() - 30 * 24 * 3600 * 1000,
+  ).toISOString();
 
   const fmtM = (n: number): string => {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-    if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
     return n.toLocaleString();
   };
   const fmtCost = (usd: number): string => `$${usd.toFixed(3)}`;
@@ -446,16 +448,21 @@ async function buildTokenStatsMessage(): Promise<string> {
 
   const getPrice = (model: string | null): { inp: number; out: number } => {
     const m = (model ?? '').toLowerCase();
-    if (m.includes('haiku'))  return { inp: 0.8,  out: 4  };
-    if (m.includes('opus'))   return { inp: 15,   out: 75 };
-    return                           { inp: 3,    out: 15 };
+    if (m.includes('haiku')) return { inp: 0.8, out: 4 };
+    if (m.includes('opus')) return { inp: 15, out: 75 };
+    return { inp: 3, out: 15 };
   };
   const safe = (v: unknown): number => (typeof v === 'number' ? v : 0);
 
   // ── 用量聚合 ───────────────────────────────────────────────────────────────
   type AggRow = {
-    ti: number; to: number;
-    m1_should: number; m1_did: number; m2_did: number; m3_should: number; m3_did: number;
+    ti: number;
+    to: number;
+    m1_should: number;
+    m1_did: number;
+    m2_did: number;
+    m3_should: number;
+    m3_did: number;
   };
   type ModelRow = { model: string | null; ti: number; to: number };
   type GroupRow = { group_id: string; ti: number; to: number };
@@ -472,45 +479,82 @@ async function buildTokenStatsMessage(): Promise<string> {
   const toAgg = (row: unknown): AggRow => {
     const r = row as Record<string, unknown>;
     return {
-      ti: safe(r['ti']), to: safe(r['to']),
-      m1_should: safe(r['m1_should']), m1_did: safe(r['m1_did']),
+      ti: safe(r['ti']),
+      to: safe(r['to']),
+      m1_should: safe(r['m1_should']),
+      m1_did: safe(r['m1_did']),
       m2_did: safe(r['m2_did']),
-      m3_should: safe(r['m3_should']), m3_did: safe(r['m3_did']),
+      m3_should: safe(r['m3_should']),
+      m3_did: safe(r['m3_did']),
     };
   };
 
   const todayAgg = toAgg(aggStmt.get(todayStr));
-  const weekAgg  = toAgg(aggStmt.get(weekAgo));
+  const weekAgg = toAgg(aggStmt.get(weekAgo));
   const monthAgg = toAgg(aggStmt.get(monthAgo));
 
-  const monthByModel = (db.prepare(`
+  const monthByModel = (
+    db
+      .prepare(
+        `
     SELECT model, SUM(input_tokens) as ti, SUM(output_tokens) as to
     FROM usage WHERE ts >= ? GROUP BY model
-  `).all(monthAgo) as unknown[]).map(r => {
+  `,
+      )
+      .all(monthAgo) as unknown[]
+  ).map((r) => {
     const row = r as Record<string, unknown>;
-    return { model: row['model'] as string | null, ti: safe(row['ti']), to: safe(row['to']) } as ModelRow;
+    return {
+      model: row['model'] as string | null,
+      ti: safe(row['ti']),
+      to: safe(row['to']),
+    } as ModelRow;
   });
-  const monthByGroup = (db.prepare(`
+  const monthByGroup = (
+    db
+      .prepare(
+        `
     SELECT group_id, SUM(input_tokens) as ti, SUM(output_tokens) as to
     FROM usage WHERE ts >= ? GROUP BY group_id
     ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC
-  `).all(monthAgo) as unknown[]).map(r => {
+  `,
+      )
+      .all(monthAgo) as unknown[]
+  ).map((r) => {
     const row = r as Record<string, unknown>;
-    return { group_id: String(row['group_id'] ?? ''), ti: safe(row['ti']), to: safe(row['to']) } as GroupRow;
+    return {
+      group_id: String(row['group_id'] ?? ''),
+      ti: safe(row['ti']),
+      to: safe(row['to']),
+    } as GroupRow;
   });
 
   // ── 优化效果聚合（日/周/月） ────────────────────────────────────────────────
   type EffRow = {
-    m1t: number; m1s: number; m1n: number; tot_in: number;
-    m2norm: number; m2con: number; m2n: number; tot_out: number;
-    m3b: number; m3a: number;
+    m1t: number;
+    m1s: number;
+    m1n: number;
+    tot_in: number;
+    m2norm: number;
+    m2con: number;
+    m2n: number;
+    tot_out: number;
+    m3b: number;
+    m3a: number;
   };
   const toEff = (row: unknown): EffRow => {
     const r = row as Record<string, unknown>;
     return {
-      m1t: safe(r['m1t']), m1s: safe(r['m1s']), m1n: safe(r['m1n']), tot_in: safe(r['tot_in']),
-      m2norm: safe(r['m2norm']), m2con: safe(r['m2con']), m2n: safe(r['m2n']), tot_out: safe(r['tot_out']),
-      m3b: safe(r['m3b']), m3a: safe(r['m3a']),
+      m1t: safe(r['m1t']),
+      m1s: safe(r['m1s']),
+      m1n: safe(r['m1n']),
+      tot_in: safe(r['tot_in']),
+      m2norm: safe(r['m2norm']),
+      m2con: safe(r['m2con']),
+      m2n: safe(r['m2n']),
+      tot_out: safe(r['tot_out']),
+      m3b: safe(r['m3b']),
+      m3a: safe(r['m3a']),
     };
   };
   const effStmt = db.prepare(`
@@ -528,35 +572,51 @@ async function buildTokenStatsMessage(): Promise<string> {
     FROM usage WHERE ts >= ?
   `);
   const todayEff = toEff(effStmt.get(todayStr));
-  const weekEff  = toEff(effStmt.get(weekAgo));
+  const weekEff = toEff(effStmt.get(weekAgo));
   const monthEff = toEff(effStmt.get(monthAgo));
 
   db.close();
 
   // ── 费用计算 ───────────────────────────────────────────────────────────────
   const costByModel = (rows: ModelRow[]) =>
-    rows.reduce((s, r) => { const p = getPrice(r.model); return s + (r.ti/1e6)*p.inp + (r.to/1e6)*p.out; }, 0);
-  const costAgg = (a: AggRow) => (a.ti/1e6)*3 + (a.to/1e6)*15;
+    rows.reduce((s, r) => {
+      const p = getPrice(r.model);
+      return s + (r.ti / 1e6) * p.inp + (r.to / 1e6) * p.out;
+    }, 0);
+  const costAgg = (a: AggRow) => (a.ti / 1e6) * 3 + (a.to / 1e6) * 15;
 
   // ── 优化效果计算 ────────────────────────────────────────────────────────────
   // M1：省 input tokens（用字节估算）
   const m1Eff = (e: EffRow) => {
     if (e.m1n <= 0 || e.m1t <= 0 || e.m1s <= 0) return null;
-    const saved = Math.round((e.m1t - e.m1s) / BYTES_PER_TOKEN * e.m1n);
+    const saved = Math.round(((e.m1t - e.m1s) / BYTES_PER_TOKEN) * e.m1n);
     const without = e.tot_in + saved;
-    return { without, saved, ratio: Math.round(saved / without * 100), cost: (saved/1e6) * getPrice(null).inp };
+    return {
+      without,
+      saved,
+      ratio: Math.round((saved / without) * 100),
+      cost: (saved / 1e6) * getPrice(null).inp,
+    };
   };
   // M2：省 output tokens（精确值）
   const m2Eff = (e: EffRow) => {
     if (e.m2n <= 0 || e.m2norm <= 0 || e.m2con <= 0) return null;
     const saved = Math.round((e.m2norm - e.m2con) * e.m2n);
     const without = e.tot_out + saved;
-    return { without, saved, ratio: Math.round(saved / without * 100), cost: (saved/1e6) * getPrice(null).out };
+    return {
+      without,
+      saved,
+      ratio: Math.round((saved / without) * 100),
+      cost: (saved / 1e6) * getPrice(null).out,
+    };
   };
   // M3：省 input tokens/消息（无法统计总量）
   const m3PerMsg = (e: EffRow) => {
     if (e.m3b <= 0 || e.m3a <= 0) return null;
-    return { perMsg: Math.round((e.m3b - e.m3a) / BYTES_PER_TOKEN), ratio: Math.round((1 - e.m3a/e.m3b) * 100) };
+    return {
+      perMsg: Math.round((e.m3b - e.m3a) / BYTES_PER_TOKEN),
+      ratio: Math.round((1 - e.m3a / e.m3b) * 100),
+    };
   };
 
   // 格式：无优化量→省量(占比)/费用
@@ -571,42 +631,52 @@ async function buildTokenStatsMessage(): Promise<string> {
 
   // 用量（日/周/月）
   lines.push(`**💰 用量 & 费用**`);
-  const usageLine = (label: string, a: AggRow, cost: number) => {
-    lines.push(`${label}：${fmtM(a.ti + a.to)} / ${fmtCost(cost)}`);
-    lines.push(`　↳ 输入 ${fmtM(a.ti)}  输出 ${fmtM(a.to)}`);
+  const usageLine = (icon: string, label: string, a: AggRow, cost: number) => {
+    lines.push(`${icon} ${label}：${fmtM(a.ti + a.to)} / ${fmtCost(cost)}`);
+    lines.push(`　↳ ⬆️ 输入 ${fmtM(a.ti)}  ⬇️ 输出 ${fmtM(a.to)}`);
   };
-  usageLine('今日', todayAgg, costAgg(todayAgg));
-  usageLine('本周', weekAgg,  costAgg(weekAgg));
-  usageLine('近30天', monthAgg, costByModel(monthByModel));
+  usageLine('📅', '今日', todayAgg, costAgg(todayAgg));
+  usageLine('📆', '本周', weekAgg, costAgg(weekAgg));
+  usageLine('🗓', '近30天', monthAgg, costByModel(monthByModel));
 
   if (monthByGroup.length > 1) {
     lines.push(`\n**📦 各群组（月）**`);
     for (const g of monthByGroup) {
       const t = g.ti + g.to;
-      if (t > 0) lines.push(`• ${g.group_id}：${fmtM(t)}`);
+      if (t > 0) lines.push(`• 🗂 ${g.group_id}：${fmtM(t)}`);
     }
   }
 
   // 监控（今日，每项一行）
   const rate = (did: number, should: number) =>
-    should > 0 ? `${did}/${should}(${Math.round(did/should*100)}%)` : `${did}次`;
+    should > 0
+      ? `${did}/${should}(${Math.round((did / should) * 100)}%)`
+      : `${did}次`;
   lines.push(`\n**🔧 优化监控（今日）**`);
-  lines.push(`M1 压缩  ${rate(todayAgg.m1_did, todayAgg.m1_should)}`);
-  lines.push(`M2 响应  ${todayAgg.m2_did}次`);
-  lines.push(`M3 系统  ${rate(todayAgg.m3_did, todayAgg.m3_should)}`);
+  lines.push(`🗜 M1 压缩  ${rate(todayAgg.m1_did, todayAgg.m1_should)}`);
+  lines.push(`✂️ M2 响应  ${todayAgg.m2_did}次`);
+  lines.push(`📝 M3 系统  ${rate(todayAgg.m3_did, todayAgg.m3_should)}`);
 
   // 效果（日/周/月，每个机制分行展示）
   lines.push(`\n**📈 优化效果**`);
-  const pushEff = (label: string, td: ReturnType<typeof m1Eff>, wk: ReturnType<typeof m1Eff>, mo: ReturnType<typeof m1Eff>) => {
-    lines.push(label);
-    lines.push(`  今 ${fmtEff(td)}`);
-    lines.push(`  周 ${fmtEff(wk)}`);
-    lines.push(`  月 ${fmtEff(mo)}`);
+  const pushEff = (
+    icon: string,
+    label: string,
+    td: ReturnType<typeof m1Eff>,
+    wk: ReturnType<typeof m1Eff>,
+    mo: ReturnType<typeof m1Eff>,
+  ) => {
+    lines.push(`${icon} ${label}`);
+    lines.push(`  📅 今 ${fmtEff(td)}`);
+    lines.push(`  📆 周 ${fmtEff(wk)}`);
+    lines.push(`  🗓 月 ${fmtEff(mo)}`);
   };
-  pushEff('M1 压缩', m1Eff(todayEff), m1Eff(weekEff), m1Eff(monthEff));
-  pushEff('M2 响应', m2Eff(todayEff), m2Eff(weekEff), m2Eff(monthEff));
+  pushEff('🗜', 'M1 压缩', m1Eff(todayEff), m1Eff(weekEff), m1Eff(monthEff));
+  pushEff('✂️', 'M2 响应', m2Eff(todayEff), m2Eff(weekEff), m2Eff(monthEff));
   const m3 = m3PerMsg(monthEff) ?? m3PerMsg(weekEff) ?? m3PerMsg(todayEff);
-  lines.push(`M3 系统  ${m3 ? `省~${m3.perMsg.toLocaleString()}tok/消息(-${m3.ratio}%)` : '暂无记录'}`);
+  lines.push(
+    `📝 M3 系统  ${m3 ? `省~${m3.perMsg.toLocaleString()}tok/消息(-${m3.ratio}%)` : '暂无记录'}`,
+  );
 
   return lines.join('\n');
 }
@@ -648,9 +718,10 @@ async function runCompact(chatJid: string): Promise<void> {
       },
     );
     if (output.newSessionId) sessions[group.folder] = output.newSessionId;
-    const msg = output.status === 'success'
-      ? '✅ 对话历史已压缩。'
-      : '❌ 压缩失败，请查看日志。';
+    const msg =
+      output.status === 'success'
+        ? '✅ 对话历史已压缩。'
+        : '❌ 压缩失败，请查看日志。';
     await ch?.sendMessage(chatJid, msg);
   } catch (err) {
     logger.error({ error: err }, 'runCompact failed');

@@ -667,9 +667,9 @@ async function buildTokenStatsMessage(): Promise<string> {
     mo: ReturnType<typeof m1Eff>,
   ) => {
     lines.push(`${icon} ${label}`);
-    lines.push(`  📅 今 ${fmtEff(td)}`);
-    lines.push(`  📆 周 ${fmtEff(wk)}`);
-    lines.push(`  🗓 月 ${fmtEff(mo)}`);
+    lines.push(`  今 ${fmtEff(td)}`);
+    lines.push(`  周 ${fmtEff(wk)}`);
+    lines.push(`  月 ${fmtEff(mo)}`);
   };
   pushEff('🗜', 'M1 压缩', m1Eff(todayEff), m1Eff(weekEff), m1Eff(monthEff));
   pushEff('✂️', 'M2 响应', m2Eff(todayEff), m2Eff(weekEff), m2Eff(monthEff));

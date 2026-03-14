@@ -653,29 +653,28 @@ async function buildTokenStatsMessage(): Promise<string> {
       ? `${did}/${should}(${Math.round((did / should) * 100)}%)`
       : `${did}次`;
   lines.push(`\n**🔧 优化监控（今日）**`);
-  lines.push(`🗜 M1 压缩  ${rate(todayAgg.m1_did, todayAgg.m1_should)}`);
-  lines.push(`✂️ M2 响应  ${todayAgg.m2_did}次`);
-  lines.push(`📝 M3 系统  ${rate(todayAgg.m3_did, todayAgg.m3_should)}`);
+  lines.push(`M1 压缩  ${rate(todayAgg.m1_did, todayAgg.m1_should)}`);
+  lines.push(`M2 响应  ${todayAgg.m2_did}次`);
+  lines.push(`M3 系统  ${rate(todayAgg.m3_did, todayAgg.m3_should)}`);
 
   // 效果（日/周/月，每个机制分行展示）
   lines.push(`\n**📈 优化效果**`);
   const pushEff = (
-    icon: string,
     label: string,
     td: ReturnType<typeof m1Eff>,
     wk: ReturnType<typeof m1Eff>,
     mo: ReturnType<typeof m1Eff>,
   ) => {
-    lines.push(`${icon} ${label}`);
+    lines.push(label);
     lines.push(`  今 ${fmtEff(td)}`);
     lines.push(`  周 ${fmtEff(wk)}`);
     lines.push(`  月 ${fmtEff(mo)}`);
   };
-  pushEff('🗜', 'M1 压缩', m1Eff(todayEff), m1Eff(weekEff), m1Eff(monthEff));
-  pushEff('✂️', 'M2 响应', m2Eff(todayEff), m2Eff(weekEff), m2Eff(monthEff));
+  pushEff('M1 压缩', m1Eff(todayEff), m1Eff(weekEff), m1Eff(monthEff));
+  pushEff('M2 响应', m2Eff(todayEff), m2Eff(weekEff), m2Eff(monthEff));
   const m3 = m3PerMsg(monthEff) ?? m3PerMsg(weekEff) ?? m3PerMsg(todayEff);
   lines.push(
-    `📝 M3 系统  ${m3 ? `省~${m3.perMsg.toLocaleString()}tok/消息(-${m3.ratio}%)` : '暂无记录'}`,
+    `M3 系统  ${m3 ? `省~${m3.perMsg.toLocaleString()}tok/消息(-${m3.ratio}%)` : '暂无记录'}`,
   );
 
   return lines.join('\n');

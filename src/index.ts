@@ -432,7 +432,12 @@ async function buildTokenStatsMessage(): Promise<string> {
   const db = new DatabaseSync(dbPath);
 
   const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
+  // 今日起点使用北京时间（UTC+8）
+  const CST_OFFSET = 8 * 3600 * 1000;
+  const cstNow = new Date(now.getTime() + CST_OFFSET);
+  const todayStr = cstNow.toISOString().slice(0, 10); // "YYYY-MM-DD" in CST
+  // 转回 UTC ISO 字符串用于 ts >= ? 比较（usage.db 存储 UTC）
+  const todayStart = new Date(`${todayStr}T00:00:00+08:00`).toISOString();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000).toISOString();
   const monthAgo = new Date(
     now.getTime() - 30 * 24 * 3600 * 1000,
@@ -468,7 +473,7 @@ async function buildTokenStatsMessage(): Promise<string> {
   type GroupRow = { group_id: string; ti: number; to: number };
 
   const aggStmt = db.prepare(`
-    SELECT SUM(input_tokens) as ti, SUM(output_tokens) as to,
+    SELECT SUM(input_tokens) as ti, SUM(output_tokens) as "to",
       SUM(COALESCE(m1_compaction_injected,0)) as m1_should,
       SUM(COALESCE(m1_summary_extracted,  0)) as m1_did,
       SUM(COALESCE(m2_constraint_injected,0)) as m2_did,
@@ -489,7 +494,7 @@ async function buildTokenStatsMessage(): Promise<string> {
     };
   };
 
-  const todayAgg = toAgg(aggStmt.get(todayStr));
+  const todayAgg = toAgg(aggStmt.get(todayStart));
   const weekAgg = toAgg(aggStmt.get(weekAgo));
   const monthAgg = toAgg(aggStmt.get(monthAgo));
 
@@ -497,7 +502,7 @@ async function buildTokenStatsMessage(): Promise<string> {
     db
       .prepare(
         `
-    SELECT model, SUM(input_tokens) as ti, SUM(output_tokens) as to
+    SELECT model, SUM(input_tokens) as ti, SUM(output_tokens) as "to"
     FROM usage WHERE ts >= ? GROUP BY model
   `,
       )
@@ -514,7 +519,7 @@ async function buildTokenStatsMessage(): Promise<string> {
     db
       .prepare(
         `
-    SELECT group_id, SUM(input_tokens) as ti, SUM(output_tokens) as to
+    SELECT group_id, SUM(input_tokens) as ti, SUM(output_tokens) as "to"
     FROM usage WHERE ts >= ? GROUP BY group_id
     ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC
   `,
@@ -571,7 +576,7 @@ async function buildTokenStatsMessage(): Promise<string> {
       AVG(CASE WHEN m3_compress_applied=1 THEN claudemd_size_after_bytes END) as m3a
     FROM usage WHERE ts >= ?
   `);
-  const todayEff = toEff(effStmt.get(todayStr));
+  const todayEff = toEff(effStmt.get(todayStart));
   const weekEff = toEff(effStmt.get(weekAgo));
   const monthEff = toEff(effStmt.get(monthAgo));
 

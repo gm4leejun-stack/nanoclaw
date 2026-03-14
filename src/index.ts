@@ -622,7 +622,7 @@ async function buildTokenStatsMessage(): Promise<string> {
   // 格式：无优化量→省量(占比)/费用
   const fmtEff = (e: ReturnType<typeof m1Eff>): string => {
     if (!e || e.saved <= 0) return '—';
-    return `无${fmtM(e.without)}→省${fmtM(e.saved)}(${e.ratio}%)/${fmtCost(e.cost)}`;
+    return `${fmtM(e.without)}→${fmtM(e.saved)}(${e.ratio}%)/${fmtCost(e.cost)}`;
   };
 
   // ── 报表组装 ───────────────────────────────────────────────────────────────
@@ -633,7 +633,7 @@ async function buildTokenStatsMessage(): Promise<string> {
   lines.push(`**💰 用量 & 费用**`);
   const usageLine = (icon: string, label: string, a: AggRow, cost: number) => {
     lines.push(`${icon} ${label}：${fmtM(a.ti + a.to)} / ${fmtCost(cost)}`);
-    lines.push(`　↳ ⬆️ 输入 ${fmtM(a.ti)}  ⬇️ 输出 ${fmtM(a.to)}`);
+    lines.push(`　↳ ⬆️ ${fmtM(a.ti)}  ⬇️ ${fmtM(a.to)}`);
   };
   usageLine('📅', '今日', todayAgg, costAgg(todayAgg));
   usageLine('📆', '本周', weekAgg, costAgg(weekAgg));

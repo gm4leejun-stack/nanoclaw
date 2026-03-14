@@ -52,6 +52,9 @@ export interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
   onResetSession?: (chatJid: string) => void;
   onOptTest?: (chatJid: string) => Promise<void>;
+  onTokenStats?: (chatJid: string) => Promise<void>;
+  onCompact?: (chatJid: string) => Promise<void>;
+  onStatus?: (chatJid: string) => Promise<void>;
 }
 
 export class TelegramChannel implements Channel {
@@ -125,6 +128,33 @@ export class TelegramChannel implements Channel {
         logger.error({ error: err }, '/opt command failed');
         await ctx.reply('❌ 测试执行失败，请查看服务日志。');
       }
+    });
+
+    // /token — Token usage statistics
+    this.bot.command('token', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) {
+        await ctx.reply('❌ 此群组未注册。');
+        return;
+      }
+      await this.opts.onTokenStats?.(chatJid);
+    });
+
+    // /compact — Manually compact conversation history
+    this.bot.command('compact', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) {
+        await ctx.reply('❌ 此群组未注册。');
+        return;
+      }
+      await ctx.reply('⏳ 正在压缩对话历史...');
+      await this.opts.onCompact?.(chatJid);
+    });
+
+    // /status — Service status
+    this.bot.command('status', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      await this.opts.onStatus?.(chatJid);
     });
 
     this.bot.on('message:text', async (ctx) => {
@@ -274,10 +304,13 @@ export class TelegramChannel implements Channel {
           );
           // Register commands so they appear in Telegram's / menu
           this.bot!.api.setMyCommands([
-            { command: 'new', description: '开始新对话（清除上下文）' },
-            { command: 'opt', description: '测试 Token 优化机制' },
-            { command: 'ping', description: '检查 bot 是否在线' },
-            { command: 'chatid', description: '获取当前 Chat ID' },
+            { command: 'new',     description: '开始新对话（清除上下文）' },
+            { command: 'compact', description: '手动压缩对话历史' },
+            { command: 'token',   description: '查看 Token 用量统计' },
+            { command: 'status',  description: '查看服务状态' },
+            { command: 'opt',     description: '测试 Token 优化机制' },
+            { command: 'ping',    description: '检查 bot 是否在线' },
+            { command: 'chatid',  description: '获取当前 Chat ID' },
           ]).catch((err) =>
             logger.warn({ err }, 'Failed to register bot commands'),
           );

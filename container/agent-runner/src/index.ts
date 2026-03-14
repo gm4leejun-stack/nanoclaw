@@ -1060,6 +1060,70 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
+  // Slash command fast-path: handle known session commands without entering the full query loop
+  const KNOWN_SESSION_COMMANDS = new Set(['/compact']);
+  if (KNOWN_SESSION_COMMANDS.has(prompt.trim())) {
+    log(`Handling slash command: ${prompt.trim()}`);
+    if (prompt.trim() === '/compact') {
+      try {
+        const compactStream = new MessageStream();
+        const existingSeedForCompact = loadExistingSeed(containerInput.groupFolder);
+        const compactPrompt = `请直接输出当前对话历史的压缩摘要，不需要任何前言或解释。${existingSeedForCompact ? `\n以下是上次已压缩的摘要（仅压缩新增内容，合并进已有摘要对应 section）：\n<existing_seed>\n${existingSeedForCompact}\n</existing_seed>` : ''}\n\n严格按照以下格式输出，标签内容不可省略：\n<compact_summary>\n<tool_results>\n[最近2轮之前的工具调用结论摘要，格式：工具名→关键结论，原始数据丢弃]\n</tool_results>\n<conversation_summary>\n<completed>[已完成事项]</completed>\n<pending>[待完成/进行中任务]</pending>\n<context>[关键背景、约束、用户偏好]</context>\n<decisions>[重要决策和结论]</decisions>\n</conversation_summary>\n</compact_summary>`;
+        compactStream.push(compactPrompt);
+        compactStream.end();
+        let compactText = '';
+        let compactSessionId: string | undefined;
+        for await (const msg of query({
+          prompt: compactStream,
+          options: {
+            cwd: '/workspace/group',
+            resume: sessionId,
+            allowedTools: [],
+            maxTurns: 1,
+            permissionMode: 'bypassPermissions' as const,
+            allowDangerouslySkipPermissions: true,
+            settingSources: ['project', 'user'] as const,
+          },
+        })) {
+          if (msg.type === 'system' && msg.subtype === 'init') {
+            compactSessionId = msg.session_id;
+          }
+          if (msg.type === 'result') {
+            compactText = (msg as { result?: string }).result || '';
+          }
+        }
+        const compactSummary = extractCompactSummary(compactText);
+        if (compactSummary) {
+          writeCompactSeed(compactSummary);
+          const seedBytes = Buffer.byteLength(compactSummary, 'utf-8');
+          log(`[/compact] Compact summary written (${compactSummary.length} chars)`);
+          writeOutput({
+            status: 'success',
+            result: null,
+            newSessionId: compactSessionId || sessionId,
+            compacted: true,
+            compactStats: { transcriptBytes: getTranscriptSize(sessionId), seedBytes },
+          });
+        } else {
+          log('[/compact] No compact_summary extracted from response');
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: 'compact command produced no summary',
+          });
+        }
+      } catch (err) {
+        log(`[/compact] Error: ${err instanceof Error ? err.message : String(err)}`);
+        writeOutput({
+          status: 'error',
+          result: null,
+          error: String(err),
+        });
+      }
+      process.exit(0);
+    }
+  }
+
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
   try {

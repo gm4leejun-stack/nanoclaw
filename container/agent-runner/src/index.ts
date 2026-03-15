@@ -36,6 +36,7 @@ interface ContainerOutput {
   newSessionId?: string;
   compacted?: boolean;   // 本轮已生成 compact summary，宿主应清除 session
   compactStats?: { transcriptBytes: number; seedBytes: number }; // 压缩前后大小
+  tokenUsage?: { in: number; out: number }; // 本次用户消息的累计 token（所有 LLM 调用之和）
   error?: string;
 }
 
@@ -546,6 +547,8 @@ export async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
   let capturedModel: string | null = null;
+  let totalInTokens = 0;   // 本次用户消息累计 input tokens（跨所有 LLM 调用）
+  let totalOutTokens = 0;  // 本次用户消息累计 output tokens
 
   // ── 加载 Token 优化状态 ──────────────────────────────────────────────────────
   const tokenOptState = loadTokenOptState();
@@ -754,8 +757,13 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
 
       // Append usage to SQLite (shared) + per-group JSONL (legacy compat)
       const resultMsg = message as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
-      const inTokens = (resultMsg.usage?.input_tokens ?? 0) + (resultMsg.usage?.cache_read_input_tokens ?? 0) + (resultMsg.usage?.cache_creation_input_tokens ?? 0);
+      const baseInTokens = resultMsg.usage?.input_tokens ?? 0;
+      const cacheReadTokens = resultMsg.usage?.cache_read_input_tokens ?? 0;
+      const cacheCreationTokens = resultMsg.usage?.cache_creation_input_tokens ?? 0;
+      const inTokens = baseInTokens + cacheReadTokens + cacheCreationTokens;
       const outTokens = resultMsg.usage?.output_tokens ?? 0;
+      totalInTokens += inTokens;
+      totalOutTokens += outTokens;
       // ── 机制一：提取 compact summary ─────────────────────────────────────
       let cleanResult = textResult;
       let summaryWasWritten = false;
@@ -879,7 +887,9 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             m3_compress_applied INTEGER NOT NULL DEFAULT 0,
             m3_validation_passed INTEGER NOT NULL DEFAULT 0,
             output_multiplier REAL NOT NULL DEFAULT 1.5,
-            output_rolling_avg REAL NOT NULL DEFAULT 0
+            output_rolling_avg REAL NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0
           )`);
           const NEW_COLUMNS = [
             "session_id TEXT",
@@ -898,6 +908,8 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
             "output_multiplier REAL NOT NULL DEFAULT 1.5",
             "output_rolling_avg REAL NOT NULL DEFAULT 0",
+            "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+            "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
           ];
           for (const col of NEW_COLUMNS) {
             try { db.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
@@ -915,8 +927,9 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             m1_compaction_injected, m1_seed_used,
             m2_constraint_injected, m3_compress_injected,
             m1_summary_extracted, m3_compress_applied, m3_validation_passed,
-            output_multiplier, output_rolling_avg
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+            output_multiplier, output_rolling_avg,
+            cache_read_tokens, cache_creation_tokens
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
             ts, container, inTokens, outTokens,
             newSessionId ?? null,
             capturedModel,
@@ -934,6 +947,8 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             m3ValidationPassed ? 1 : 0,
             tokenOptState.outputMultiplier,
             recentAvg,
+            cacheReadTokens,
+            cacheCreationTokens,
           );
           db.close();
           // Legacy JSONL (backward compat)
@@ -958,6 +973,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
         newSessionId,
         compacted: summaryWasWritten || undefined,
         compactStats,
+        tokenUsage: (totalInTokens > 0 || totalOutTokens > 0) ? { in: totalInTokens, out: totalOutTokens } : undefined,
       });
     }
   }

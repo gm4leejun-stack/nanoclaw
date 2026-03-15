@@ -51,6 +51,7 @@ export interface ContainerOutput {
   newSessionId?: string;
   compacted?: boolean; // 本轮已生成 compact summary，宿主应清除 session
   compactStats?: { transcriptBytes: number; seedBytes: number };
+  tokenUsage?: { in: number; out: number }; // 本次用户消息的累计 token（所有 LLM 调用之和）
   error?: string;
 }
 

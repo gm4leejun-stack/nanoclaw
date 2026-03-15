@@ -304,13 +304,14 @@ export class TelegramChannel implements Channel {
           );
           // Register commands so they appear in Telegram's / menu
           this.bot!.api.setMyCommands([
-            { command: 'new',     description: '开始新对话（清除上下文）' },
+            { command: 'new', description: '开始新对话（清除上下文）' },
             { command: 'compact', description: '手动压缩对话历史' },
-            { command: 'token',   description: '查看 Token 用量统计' },
-            { command: 'status',  description: '查看服务状态' },
-            { command: 'opt',     description: '测试 Token 优化机制' },
-            { command: 'ping',    description: '检查 bot 是否在线' },
-            { command: 'chatid',  description: '获取当前 Chat ID' },
+            { command: 'token', description: '查看 Token 用量统计' },
+            { command: 'status', description: '查看服务状态' },
+            { command: 'opt', description: '测试 Token 优化机制' },
+            { command: 'ping', description: '检查 bot 是否在线' },
+            { command: 'chatid', description: '获取当前 Chat ID' },
+            { command: 'input', description: '查看上次 input 各部分构成' },
           ]).catch((err) =>
             logger.warn({ err }, 'Failed to register bot commands'),
           );

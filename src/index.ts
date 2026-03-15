@@ -186,6 +186,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
+  // Fast path: "/input" — show last LLM call input breakdown
+  if (lastContent === '/input') {
+    try {
+      const msg = await buildInputBreakdownMessage(chatJid);
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      await channel.sendMessage(chatJid, msg);
+      return true;
+    } catch (err) {
+      logger.warn({ err }, 'Failed to compute input breakdown');
+      // Fall through to container agent on error
+    }
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
@@ -237,7 +252,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ? result.result
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      // 在最终结果末尾附加 token 水印（不进入 LLM 上下文，零 token 消耗）
+      if (text && result.status === 'success' && result.tokenUsage) {
+        const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+        text += `\n\n[⬆️ ${fmt(result.tokenUsage.in)}  ⬇️ ${fmt(result.tokenUsage.out)}]`;
+      }
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await channel.sendMessage(chatJid, text);
@@ -1061,6 +1081,97 @@ async function main(): Promise<void> {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
   });
+}
+
+// ── /input 指令：显示上一次 LLM 调用的 input 各部分构成 ─────────────────────
+async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
+  const dbPath = path.join(DATA_DIR, 'shared', 'usage', 'usage.db');
+  if (!fs.existsSync(dbPath)) {
+    return '📊 暂无用量数据（usage.db 未找到）。';
+  }
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(dbPath);
+
+  // 查询该群组最近一条记录
+  const row = db.prepare(`
+    SELECT input_tokens, output_tokens,
+           transcript_size_bytes, seed_size_bytes, claudemd_size_bytes,
+           cache_read_tokens, cache_creation_tokens,
+           model, ts, container
+    FROM usage
+    WHERE group_id = ?
+    ORDER BY id DESC LIMIT 1
+  `).get(chatJid) as Record<string, unknown> | undefined;
+
+  db.close();
+
+  if (!row) {
+    return '📊 暂无该群组的用量记录。';
+  }
+
+  const safe = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  const fmtK = (n: number): string =>
+    n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  const fmtBytes = (b: number): string => {
+    if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)}MB`;
+    if (b >= 1024) return `${(b / 1024).toFixed(1)}KB`;
+    return `${b}B`;
+  };
+  // bytes → 估算 token（约 3.5 bytes/token）
+  const BYTES_PER_TOKEN = 3.5;
+  const bytesToTok = (b: number): number => Math.round(b / BYTES_PER_TOKEN);
+
+  const totalIn = safe(row['input_tokens']);
+  const totalOut = safe(row['output_tokens']);
+  const transcriptBytes = safe(row['transcript_size_bytes']);
+  const seedBytes = safe(row['seed_size_bytes']);
+  const claudemdBytes = safe(row['claudemd_size_bytes']);
+  const cacheRead = safe(row['cache_read_tokens']);
+  const cacheCreate = safe(row['cache_creation_tokens']);
+  const model = String(row['model'] || 'unknown');
+  const ts = String(row['ts'] || '');
+
+  // 推算各部分 token（均为估算）
+  const transcriptTok = bytesToTok(transcriptBytes);
+  const seedTok = bytesToTok(seedBytes);
+  const claudemdTok = bytesToTok(claudemdBytes);
+  // 其余部分（当前消息 + 工具调用等）
+  const otherTok = Math.max(0, totalIn - transcriptTok - seedTok - claudemdTok);
+
+  // 北京时间
+  const cstTs = new Date(new Date(ts).getTime() + 8 * 3600 * 1000)
+    .toISOString().replace('T', ' ').slice(0, 19) + ' CST';
+
+  const bar = (tok: number, total: number): string => {
+    const pct = total > 0 ? Math.round((tok / total) * 100) : 0;
+    return `${fmtK(tok)} (${pct}%)`;
+  };
+
+  let msg = `📥 上次 Input 构成分析\n`;
+  msg += `🕐 ${cstTs}\n`;
+  msg += `🤖 ${model}\n\n`;
+  msg += `─────────────────\n`;
+  msg += `📜 对话历史 transcript: ${bar(transcriptTok, totalIn)}\n`;
+  msg += `   原始大小: ${fmtBytes(transcriptBytes)}\n`;
+  if (seedBytes > 0) {
+    msg += `🌱 压缩摘要 seed: ${bar(seedTok, totalIn)}\n`;
+    msg += `   原始大小: ${fmtBytes(seedBytes)}\n`;
+  }
+  msg += `📋 系统提示 CLAUDE.md: ${bar(claudemdTok, totalIn)}\n`;
+  msg += `   原始大小: ${fmtBytes(claudemdBytes)}\n`;
+  if (otherTok > 0) {
+    msg += `💬 当前消息+工具等: ${bar(otherTok, totalIn)}\n`;
+  }
+  msg += `─────────────────\n`;
+  msg += `⬆️ Input 合计: ${fmtK(totalIn)}\n`;
+  if (cacheRead > 0 || cacheCreate > 0) {
+    msg += `  ├ 缓存命中: ${fmtK(cacheRead)}\n`;
+    msg += `  └ 缓存写入: ${fmtK(cacheCreate)}\n`;
+  }
+  msg += `⬇️ Output: ${fmtK(totalOut)}\n`;
+
+  return msg;
 }
 
 // Guard: only run when executed directly, not when imported by tests

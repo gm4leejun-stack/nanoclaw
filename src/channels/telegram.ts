@@ -53,6 +53,7 @@ export interface TelegramChannelOpts {
   onResetSession?: (chatJid: string) => void;
   onOptTest?: (chatJid: string) => Promise<void>;
   onTokenStats?: (chatJid: string) => Promise<void>;
+  onInputStats?: (chatJid: string) => Promise<void>;
   onCompact?: (chatJid: string) => Promise<void>;
   onStatus?: (chatJid: string) => Promise<void>;
 }
@@ -138,6 +139,16 @@ export class TelegramChannel implements Channel {
         return;
       }
       await this.opts.onTokenStats?.(chatJid);
+    });
+
+    // /input — Show last LLM call input breakdown
+    this.bot.command('input', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) {
+        await ctx.reply('❌ 此群组未注册。');
+        return;
+      }
+      await this.opts.onInputStats?.(chatJid);
     });
 
     // /compact — Manually compact conversation history

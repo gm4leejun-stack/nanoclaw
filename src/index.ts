@@ -255,7 +255,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       // 在最终结果末尾附加 token 水印（不进入 LLM 上下文，零 token 消耗）
       if (text && result.status === 'success' && result.tokenUsage) {
-        const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+        const fmt = (n: number) =>
+          n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
         text += `\n\n[⬆️ ${fmt(result.tokenUsage.in)}  ⬇️ ${fmt(result.tokenUsage.out)}]`;
       }
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
@@ -716,6 +717,17 @@ async function runTokenStats(chatJid: string): Promise<void> {
   }
 }
 
+async function runInputStats(chatJid: string): Promise<void> {
+  const ch = findChannel(channels, chatJid);
+  try {
+    const msg = await buildInputBreakdownMessage(chatJid);
+    await ch?.sendMessage(chatJid, msg);
+  } catch (err) {
+    logger.warn({ err }, 'runInputStats failed');
+    await ch?.sendMessage(chatJid, '❌ 获取 input 构成失败，请查看日志。');
+  }
+}
+
 async function runCompact(chatJid: string): Promise<void> {
   const group = registeredGroups[chatJid];
   const ch = findChannel(channels, chatJid);
@@ -1010,6 +1022,7 @@ async function main(): Promise<void> {
     },
     onOptTest: runOptTest,
     onTokenStats: runTokenStats,
+    onInputStats: runInputStats,
     onCompact: runCompact,
     onStatus: runStatus,
   };
@@ -1093,8 +1106,13 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(dbPath);
 
+  // chatJid 是 Telegram 数字 ID，usage 表 group_id 存的是 group.folder（如 telegram_main）
+  const groupFolder = registeredGroups[chatJid]?.folder ?? chatJid;
+
   // 查询该群组最近一条记录
-  const row = db.prepare(`
+  const row = db
+    .prepare(
+      `
     SELECT input_tokens, output_tokens,
            transcript_size_bytes, seed_size_bytes, claudemd_size_bytes,
            cache_read_tokens, cache_creation_tokens,
@@ -1102,7 +1120,9 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
     FROM usage
     WHERE group_id = ?
     ORDER BY id DESC LIMIT 1
-  `).get(chatJid) as Record<string, unknown> | undefined;
+  `,
+    )
+    .get(groupFolder) as Record<string, unknown> | undefined;
 
   db.close();
 
@@ -1140,8 +1160,11 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   const otherTok = Math.max(0, totalIn - transcriptTok - seedTok - claudemdTok);
 
   // 北京时间
-  const cstTs = new Date(new Date(ts).getTime() + 8 * 3600 * 1000)
-    .toISOString().replace('T', ' ').slice(0, 19) + ' CST';
+  const cstTs =
+    new Date(new Date(ts).getTime() + 8 * 3600 * 1000)
+      .toISOString()
+      .replace('T', ' ')
+      .slice(0, 19) + ' CST';
 
   const bar = (tok: number, total: number): string => {
     const pct = total > 0 ? Math.round((tok / total) * 100) : 0;

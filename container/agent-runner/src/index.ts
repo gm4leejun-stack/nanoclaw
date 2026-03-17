@@ -708,6 +708,15 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // Cross-loop state: accumulated metadata for single post-loop DB write
+  let summaryWasWritten = false;
+  let compactStats: { preCompactTokens: number; seedTokens: number } | undefined;
+  let m3CompressApplied = false;
+  let m3ValidationPassed = false;
+  let compressedMdContent: string | null = null;
+  let totalCacheReadTokens = 0;
+  let totalCacheCreationTokens = 0;
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -773,26 +782,27 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
       const textResult = res.result || null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
-      // Append usage to SQLite (shared) + per-group JSONL (legacy compat)
+      // Accumulate token usage across all result messages in this query
       const resultMsg = message as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
       const baseInTokens = resultMsg.usage?.input_tokens ?? 0;
-      const cacheReadTokens = resultMsg.usage?.cache_read_input_tokens ?? 0;
-      const cacheCreationTokens = resultMsg.usage?.cache_creation_input_tokens ?? 0;
-      const inTokens = baseInTokens + cacheReadTokens + cacheCreationTokens;
-      const outTokens = resultMsg.usage?.output_tokens ?? 0;
-      totalInTokens += inTokens;
-      totalOutTokens += outTokens;
+      const turnCacheRead = resultMsg.usage?.cache_read_input_tokens ?? 0;
+      const turnCacheCreate = resultMsg.usage?.cache_creation_input_tokens ?? 0;
+      const turnInTokens = baseInTokens + turnCacheRead + turnCacheCreate;
+      const turnOutTokens = resultMsg.usage?.output_tokens ?? 0;
+      totalInTokens += turnInTokens;
+      totalOutTokens += turnOutTokens;
+      totalCacheReadTokens += turnCacheRead;
+      totalCacheCreationTokens += turnCacheCreate;
+
       // ── 机制一：提取 compact summary ─────────────────────────────────────
       let cleanResult = textResult;
-      let summaryWasWritten = false;
-      let compactStats: { preCompactTokens: number; seedTokens: number } | undefined;
-      if (textResult && compactInstruction) {
+      if (textResult && compactInstruction && !summaryWasWritten) {
         const summary = extractCompactSummary(textResult);
         if (summary) {
           writeCompactSeed(summary);
           summaryWasWritten = true;
           const seedTokens = Math.round(Buffer.byteLength(summary, 'utf-8') / 3.5);
-          compactStats = { preCompactTokens: m1Increment + inTokens, seedTokens };
+          compactStats = { preCompactTokens: m1Increment + turnInTokens, seedTokens };
           log(`[token-opt] Compact summary extracted and written (${summary.length} chars, seedTokens=${seedTokens})`);
           // 从回复中移除 compact_summary 标签，不展示给用户
           cleanResult = textResult.replace(/<compact_summary>[\s\S]*?<\/compact_summary>/g, '').trim();
@@ -833,7 +843,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
               writeCompactSeed(fbSummary);
               summaryWasWritten = true;
               const fbSeedTokens = Math.round(Buffer.byteLength(fbSummary, 'utf-8') / 3.5);
-              compactStats = { preCompactTokens: m1Increment + inTokens, seedTokens: fbSeedTokens };
+              compactStats = { preCompactTokens: m1Increment + turnInTokens, seedTokens: fbSeedTokens };
               log(`[token-opt] M1: fallback compaction succeeded, seed written (${fbSummary.length} chars, seedTokens=${fbSeedTokens})`);
             } else {
               log('[token-opt] M1: fallback compaction also produced no summary, skipping');
@@ -845,10 +855,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
       }
 
       // ── 机制三：提取并验证压缩后的 CLAUDE.md ─────────────────────────────
-      let m3CompressApplied = false;
-      let m3ValidationPassed = false;
-      let compressedMdContent: string | null = null;
-      if (cleanResult && claudeMdCompressInstruction) {
+      if (cleanResult && claudeMdCompressInstruction && !m3CompressApplied) {
         const compressedMd = extractCompressedClaudeMd(cleanResult);
         if (compressedMd) {
           compressedMdContent = compressedMd;
@@ -877,166 +884,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
         }
       }
 
-      if (inTokens > 0 || outTokens > 0) {
-        try {
-          const ts = new Date().toISOString();
-          const container = containerInput.groupFolder;
-          const sharedUsageDir = `${WORKSPACE_DIR}/shared/usage`;
-          fs.mkdirSync(sharedUsageDir, { recursive: true });
-          // Write to SQLite
-          const { DatabaseSync } = await import('node:sqlite');
-          const db = new DatabaseSync(path.join(sharedUsageDir, 'usage.db'));
-          db.exec(`CREATE TABLE IF NOT EXISTS usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            container TEXT NOT NULL,
-            input_tokens INTEGER NOT NULL,
-            output_tokens INTEGER NOT NULL,
-            session_id TEXT,
-            model TEXT,
-            group_id TEXT NOT NULL DEFAULT '',
-            transcript_size_bytes INTEGER NOT NULL DEFAULT 0,
-            seed_size_bytes INTEGER NOT NULL DEFAULT 0,
-            claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
-            claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
-            global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
-            skills_size_bytes INTEGER NOT NULL DEFAULT 0,
-            m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
-            m1_seed_used INTEGER NOT NULL DEFAULT 0,
-            m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
-            m3_compress_injected INTEGER NOT NULL DEFAULT 0,
-            m1_summary_extracted INTEGER NOT NULL DEFAULT 0,
-            m3_compress_applied INTEGER NOT NULL DEFAULT 0,
-            m3_validation_passed INTEGER NOT NULL DEFAULT 0,
-            output_multiplier REAL NOT NULL DEFAULT 1.5,
-            output_rolling_avg REAL NOT NULL DEFAULT 0,
-            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-            cache_creation_tokens INTEGER NOT NULL DEFAULT 0
-          )`);
-          const NEW_COLUMNS = [
-            "session_id TEXT",
-            "model TEXT",
-            "group_id TEXT NOT NULL DEFAULT ''",
-            "transcript_size_bytes INTEGER NOT NULL DEFAULT 0",
-            "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
-            "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
-            "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
-            "global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
-            "skills_size_bytes INTEGER NOT NULL DEFAULT 0",
-            "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
-            "m1_seed_used INTEGER NOT NULL DEFAULT 0",
-            "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
-            "m3_compress_injected INTEGER NOT NULL DEFAULT 0",
-            "m1_summary_extracted INTEGER NOT NULL DEFAULT 0",
-            "m3_compress_applied INTEGER NOT NULL DEFAULT 0",
-            "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
-            "output_multiplier REAL NOT NULL DEFAULT 1.5",
-            "output_rolling_avg REAL NOT NULL DEFAULT 0",
-            "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
-            "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
-          ];
-          for (const col of NEW_COLUMNS) {
-            try { db.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
-          }
-          db.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
-          db.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
-          db.exec('CREATE INDEX IF NOT EXISTS idx_group_id ON usage(group_id)');
-          db.exec('CREATE INDEX IF NOT EXISTS idx_session  ON usage(session_id)');
-          db.exec('CREATE INDEX IF NOT EXISTS idx_model    ON usage(model)');
-          db.prepare(`INSERT INTO usage (
-            ts, container, input_tokens, output_tokens,
-            session_id, model, group_id,
-            transcript_size_bytes, seed_size_bytes,
-            claudemd_size_bytes, claudemd_size_after_bytes,
-            global_claudemd_size_bytes, skills_size_bytes,
-            m1_compaction_injected, m1_seed_used,
-            m2_constraint_injected, m3_compress_injected,
-            m1_summary_extracted, m3_compress_applied, m3_validation_passed,
-            output_multiplier, output_rolling_avg,
-            cache_read_tokens, cache_creation_tokens
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-            ts, container, inTokens, outTokens,
-            newSessionId ?? null,
-            capturedModel,
-            containerInput.groupFolder,
-            transcriptSize,
-            containerInput.compactSeed ? Buffer.byteLength(containerInput.compactSeed, 'utf-8') : 0,
-            claudeMdBytes,
-            compressedMdContent !== null ? Buffer.byteLength(compressedMdContent, 'utf-8') : claudeMdBytes,
-            globalClaudeMdBytes,
-            skillsBytes,
-            compactInstruction ? 1 : 0,
-            (containerInput.compactSeed && !sessionId) ? 1 : 0,
-            injectConstraint ? 1 : 0,
-            claudeMdCompressInstruction ? 1 : 0,
-            summaryWasWritten ? 1 : 0,
-            m3CompressApplied ? 1 : 0,
-            m3ValidationPassed ? 1 : 0,
-            tokenOptState.outputMultiplier,
-            recentAvg,
-            cacheReadTokens,
-            cacheCreationTokens,
-          );
-          db.close();
-          // Legacy JSONL (backward compat)
-          const entry = JSON.stringify({ ts, in: inTokens, out: outTokens, total: inTokens + outTokens }) + '\n';
-          fs.appendFileSync(path.join(sharedUsageDir, `${container}.json`), entry);
-          fs.mkdirSync(`${WORKSPACE_DIR}/group/data`, { recursive: true });
-          fs.appendFileSync(`${WORKSPACE_DIR}/group/data/usage.json`, entry);
-        } catch (err) {
-          log(`Failed to write usage: ${err instanceof Error ? err.message : String(err)}`);
-        }
-
-        // ── 更新 Token 优化状态 ──────────────────────────────────────────────
-        tokenOptState.totalInputTokens += inTokens;
-
-        // M1 自适应：上次压缩后的首轮效果评估
-        if (tokenOptState.awaitingPostCompactMeasure) {
-          if (!summaryWasWritten) {
-            // 正常情况：评估压缩效果并调整阈值
-            const dropRatio = tokenOptState.lastPreCompactIncrement > 0
-              ? (tokenOptState.lastPreCompactIncrement - inTokens) / tokenOptState.lastPreCompactIncrement
-              : 0;
-            if (tokenOptState.lastPreCompactIncrement > M1_ABSOLUTE_CEILING) {
-              // 优先级1：触发太晚，需要激进收紧
-              tokenOptState.m1IncrementThreshold = Math.min(
-                Math.floor(tokenOptState.m1IncrementThreshold * 0.7),
-                M1_THRESHOLD_INIT,
-              );
-            } else if (dropRatio < 0.15) {
-              // 优先级2：压缩几乎无效，轻微收紧
-              tokenOptState.m1IncrementThreshold = Math.max(
-                Math.floor(tokenOptState.m1IncrementThreshold * 0.9),
-                M1_THRESHOLD_MIN,
-              );
-            } else if (dropRatio > 0.40) {
-              // 优先级3：压缩效果好，适当放宽
-              tokenOptState.m1IncrementThreshold = Math.min(
-                Math.floor(tokenOptState.m1IncrementThreshold * 1.1),
-                M1_THRESHOLD_MAX,
-              );
-            }
-            log(`[token-opt] M1 adaptive: dropRatio=${(dropRatio * 100).toFixed(1)}% lastPreCompact=${tokenOptState.lastPreCompactIncrement} newThreshold=${tokenOptState.m1IncrementThreshold}`);
-          } else {
-            // back-to-back 压缩：跳过效果评估，避免数据污染
-            log('[token-opt] M1 adaptive: back-to-back compaction, skipping effect evaluation');
-          }
-          tokenOptState.awaitingPostCompactMeasure = false;
-        }
-
-        // M1 压缩成功后：记录 lastCompactTokens，开启下轮效果评估
-        if (summaryWasWritten) {
-          tokenOptState.lastPreCompactIncrement = m1Increment + inTokens;
-          tokenOptState.lastCompactTokens = tokenOptState.totalInputTokens;
-          tokenOptState.awaitingPostCompactMeasure = true;
-          log(`[token-opt] M1 compact done: lastCompactTokens=${tokenOptState.lastCompactTokens}, lastPreCompactIncrement=${tokenOptState.lastPreCompactIncrement}`);
-        }
-
-        updateOutputTracking(tokenOptState, outTokens, injectConstraint);
-        saveTokenOptState(tokenOptState);
-        log(`[token-opt] totalInput=${tokenOptState.totalInputTokens}, increment=${m1Increment}, m1Threshold=${tokenOptState.m1IncrementThreshold}, lastOut=${outTokens}`);
-      }
-
+      // Send streaming output to host immediately (per result message)
       writeOutput({
         status: 'success',
         result: cleanResult || null,
@@ -1046,6 +894,161 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
         tokenUsage: (totalInTokens > 0 || totalOutTokens > 0) ? { in: totalInTokens, out: totalOutTokens } : undefined,
       });
     }
+  }
+
+  // ── 循环结束后：写 DB（用累计 token，一条记录代表整个 query）──────────────
+  if (totalInTokens > 0 || totalOutTokens > 0) {
+    try {
+      const ts = new Date().toISOString();
+      const container = containerInput.groupFolder;
+      const sharedUsageDir = `${WORKSPACE_DIR}/shared/usage`;
+      fs.mkdirSync(sharedUsageDir, { recursive: true });
+      const { DatabaseSync } = await import('node:sqlite');
+      const db = new DatabaseSync(path.join(sharedUsageDir, 'usage.db'));
+      db.exec(`CREATE TABLE IF NOT EXISTS usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        container TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        session_id TEXT,
+        model TEXT,
+        group_id TEXT NOT NULL DEFAULT '',
+        transcript_size_bytes INTEGER NOT NULL DEFAULT 0,
+        seed_size_bytes INTEGER NOT NULL DEFAULT 0,
+        claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+        claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
+        global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+        skills_size_bytes INTEGER NOT NULL DEFAULT 0,
+        m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
+        m1_seed_used INTEGER NOT NULL DEFAULT 0,
+        m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
+        m3_compress_injected INTEGER NOT NULL DEFAULT 0,
+        m1_summary_extracted INTEGER NOT NULL DEFAULT 0,
+        m3_compress_applied INTEGER NOT NULL DEFAULT 0,
+        m3_validation_passed INTEGER NOT NULL DEFAULT 0,
+        output_multiplier REAL NOT NULL DEFAULT 1.5,
+        output_rolling_avg REAL NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0
+      )`);
+      const NEW_COLUMNS = [
+        "session_id TEXT",
+        "model TEXT",
+        "group_id TEXT NOT NULL DEFAULT ''",
+        "transcript_size_bytes INTEGER NOT NULL DEFAULT 0",
+        "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
+        "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+        "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
+        "global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+        "skills_size_bytes INTEGER NOT NULL DEFAULT 0",
+        "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
+        "m1_seed_used INTEGER NOT NULL DEFAULT 0",
+        "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
+        "m3_compress_injected INTEGER NOT NULL DEFAULT 0",
+        "m1_summary_extracted INTEGER NOT NULL DEFAULT 0",
+        "m3_compress_applied INTEGER NOT NULL DEFAULT 0",
+        "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
+        "output_multiplier REAL NOT NULL DEFAULT 1.5",
+        "output_rolling_avg REAL NOT NULL DEFAULT 0",
+        "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+        "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+      ];
+      for (const col of NEW_COLUMNS) {
+        try { db.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_group_id ON usage(group_id)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_session  ON usage(session_id)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_model    ON usage(model)');
+      // Use cumulative totals so /input always matches the watermark
+      db.prepare(`INSERT INTO usage (
+        ts, container, input_tokens, output_tokens,
+        session_id, model, group_id,
+        transcript_size_bytes, seed_size_bytes,
+        claudemd_size_bytes, claudemd_size_after_bytes,
+        global_claudemd_size_bytes, skills_size_bytes,
+        m1_compaction_injected, m1_seed_used,
+        m2_constraint_injected, m3_compress_injected,
+        m1_summary_extracted, m3_compress_applied, m3_validation_passed,
+        output_multiplier, output_rolling_avg,
+        cache_read_tokens, cache_creation_tokens
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        ts, container, totalInTokens, totalOutTokens,
+        newSessionId ?? null,
+        capturedModel,
+        containerInput.groupFolder,
+        transcriptSize,
+        containerInput.compactSeed ? Buffer.byteLength(containerInput.compactSeed, 'utf-8') : 0,
+        claudeMdBytes,
+        compressedMdContent !== null ? Buffer.byteLength(compressedMdContent, 'utf-8') : claudeMdBytes,
+        globalClaudeMdBytes,
+        skillsBytes,
+        compactInstruction ? 1 : 0,
+        (containerInput.compactSeed && !sessionId) ? 1 : 0,
+        injectConstraint ? 1 : 0,
+        claudeMdCompressInstruction ? 1 : 0,
+        summaryWasWritten ? 1 : 0,
+        m3CompressApplied ? 1 : 0,
+        m3ValidationPassed ? 1 : 0,
+        tokenOptState.outputMultiplier,
+        recentAvg,
+        totalCacheReadTokens,
+        totalCacheCreationTokens,
+      );
+      db.close();
+      // Legacy JSONL (backward compat)
+      const entry = JSON.stringify({ ts, in: totalInTokens, out: totalOutTokens, total: totalInTokens + totalOutTokens }) + '\n';
+      fs.appendFileSync(path.join(sharedUsageDir, `${container}.json`), entry);
+      fs.mkdirSync(`${WORKSPACE_DIR}/group/data`, { recursive: true });
+      fs.appendFileSync(`${WORKSPACE_DIR}/group/data/usage.json`, entry);
+    } catch (err) {
+      log(`Failed to write usage: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // ── 更新 Token 优化状态 ──────────────────────────────────────────────
+    tokenOptState.totalInputTokens += totalInTokens;
+
+    // M1 自适应：上次压缩后的首轮效果评估（用本次 query 总 token）
+    if (tokenOptState.awaitingPostCompactMeasure) {
+      if (!summaryWasWritten) {
+        const dropRatio = tokenOptState.lastPreCompactIncrement > 0
+          ? (tokenOptState.lastPreCompactIncrement - totalInTokens) / tokenOptState.lastPreCompactIncrement
+          : 0;
+        if (tokenOptState.lastPreCompactIncrement > M1_ABSOLUTE_CEILING) {
+          tokenOptState.m1IncrementThreshold = Math.min(
+            Math.floor(tokenOptState.m1IncrementThreshold * 0.7),
+            M1_THRESHOLD_INIT,
+          );
+        } else if (dropRatio < 0.15) {
+          tokenOptState.m1IncrementThreshold = Math.max(
+            Math.floor(tokenOptState.m1IncrementThreshold * 0.9),
+            M1_THRESHOLD_MIN,
+          );
+        } else if (dropRatio > 0.40) {
+          tokenOptState.m1IncrementThreshold = Math.min(
+            Math.floor(tokenOptState.m1IncrementThreshold * 1.1),
+            M1_THRESHOLD_MAX,
+          );
+        }
+        log(`[token-opt] M1 adaptive: dropRatio=${(dropRatio * 100).toFixed(1)}% lastPreCompact=${tokenOptState.lastPreCompactIncrement} newThreshold=${tokenOptState.m1IncrementThreshold}`);
+      } else {
+        log('[token-opt] M1 adaptive: back-to-back compaction, skipping effect evaluation');
+      }
+      tokenOptState.awaitingPostCompactMeasure = false;
+    }
+
+    if (summaryWasWritten) {
+      tokenOptState.lastPreCompactIncrement = m1Increment + totalInTokens;
+      tokenOptState.lastCompactTokens = tokenOptState.totalInputTokens;
+      tokenOptState.awaitingPostCompactMeasure = true;
+      log(`[token-opt] M1 compact done: lastCompactTokens=${tokenOptState.lastCompactTokens}`);
+    }
+
+    updateOutputTracking(tokenOptState, totalOutTokens, injectConstraint);
+    saveTokenOptState(tokenOptState);
+    log(`[token-opt] totalInput=${tokenOptState.totalInputTokens}, increment=${m1Increment}, m1Threshold=${tokenOptState.m1IncrementThreshold}, lastOut=${totalOutTokens}`);
   }
 
   ipcPolling = false;

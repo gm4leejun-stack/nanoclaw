@@ -750,7 +750,8 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     output_multiplier REAL NOT NULL DEFAULT 1.5,
     output_rolling_avg REAL NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_creation_tokens INTEGER NOT NULL DEFAULT 0
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    last_compact_tokens INTEGER NOT NULL DEFAULT 0
   )`);
   const DB_NEW_COLUMNS = [
     "session_id TEXT",
@@ -773,6 +774,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     "output_rolling_avg REAL NOT NULL DEFAULT 0",
     "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
     "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+    "last_compact_tokens INTEGER NOT NULL DEFAULT 0",
   ];
   for (const col of DB_NEW_COLUMNS) {
     try { usageDb.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
@@ -793,8 +795,9 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     m2_constraint_injected, m3_compress_injected,
     m1_summary_extracted, m3_compress_applied, m3_validation_passed,
     output_multiplier, output_rolling_avg,
-    cache_read_tokens, cache_creation_tokens
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    cache_read_tokens, cache_creation_tokens,
+    last_compact_tokens
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(ts, container) DO UPDATE SET
     input_tokens=excluded.input_tokens,
     output_tokens=excluded.output_tokens,
@@ -1010,6 +1013,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             recentAvg,
             totalCacheReadTokens,
             totalCacheCreationTokens,
+            tokenOptState.lastCompactTokens,
           );
         } catch (err) {
           log(`Failed to upsert usage: ${err instanceof Error ? err.message : String(err)}`);

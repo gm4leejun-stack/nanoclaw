@@ -35,7 +35,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   compacted?: boolean;   // 本轮已生成 compact summary，宿主应清除 session
-  compactStats?: { transcriptBytes: number; seedBytes: number }; // 压缩前后大小
+  compactStats?: { preCompactTokens: number; seedTokens: number }; // 压缩前后 token 数
   tokenUsage?: { in: number; out: number }; // 本次用户消息的累计 token（所有 LLM 调用之和）
   error?: string;
 }
@@ -1184,14 +1184,15 @@ async function main(): Promise<void> {
         const compactSummary = extractCompactSummary(compactText);
         if (compactSummary) {
           writeCompactSeed(compactSummary);
-          const seedBytes = Buffer.byteLength(compactSummary, 'utf-8');
-          log(`[/compact] Compact summary written (${compactSummary.length} chars)`);
+          const seedTokens = Math.round(Buffer.byteLength(compactSummary, 'utf-8') / 3.5);
+          const preCompactTokens = Math.round(getTranscriptSize(sessionId) / 3.5);
+          log(`[/compact] Compact summary written (${compactSummary.length} chars, seedTokens=${seedTokens})`);
           writeOutput({
             status: 'success',
             result: null,
             newSessionId: compactSessionId || sessionId,
             compacted: true,
-            compactStats: { transcriptBytes: getTranscriptSize(sessionId), seedBytes },
+            compactStats: { preCompactTokens, seedTokens },
           });
         } else {
           log('[/compact] No compact_summary extracted from response');

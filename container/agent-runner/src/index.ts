@@ -708,7 +708,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  // Cross-loop state: accumulated metadata for single post-loop DB write
+  // Cross-loop state: accumulated metadata, written to DB after each result
   let summaryWasWritten = false;
   let compactStats: { preCompactTokens: number; seedTokens: number } | undefined;
   let m3CompressApplied = false;
@@ -716,6 +716,96 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
   let compressedMdContent: string | null = null;
   let totalCacheReadTokens = 0;
   let totalCacheCreationTokens = 0;
+
+  // Open DB once before loop so we can upsert after every result message.
+  // Using a fixed runTs as unique key ensures repeated upserts update the
+  // same row rather than inserting duplicates.
+  const runTs = new Date().toISOString();
+  const sharedUsageDir = `${WORKSPACE_DIR}/shared/usage`;
+  fs.mkdirSync(sharedUsageDir, { recursive: true });
+  const { DatabaseSync } = await import('node:sqlite');
+  const usageDb = new DatabaseSync(path.join(sharedUsageDir, 'usage.db'));
+  usageDb.exec(`CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    container TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    session_id TEXT,
+    model TEXT,
+    group_id TEXT NOT NULL DEFAULT '',
+    transcript_size_bytes INTEGER NOT NULL DEFAULT 0,
+    seed_size_bytes INTEGER NOT NULL DEFAULT 0,
+    claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+    claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
+    global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+    skills_size_bytes INTEGER NOT NULL DEFAULT 0,
+    m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
+    m1_seed_used INTEGER NOT NULL DEFAULT 0,
+    m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
+    m3_compress_injected INTEGER NOT NULL DEFAULT 0,
+    m1_summary_extracted INTEGER NOT NULL DEFAULT 0,
+    m3_compress_applied INTEGER NOT NULL DEFAULT 0,
+    m3_validation_passed INTEGER NOT NULL DEFAULT 0,
+    output_multiplier REAL NOT NULL DEFAULT 1.5,
+    output_rolling_avg REAL NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0
+  )`);
+  const DB_NEW_COLUMNS = [
+    "session_id TEXT",
+    "model TEXT",
+    "group_id TEXT NOT NULL DEFAULT ''",
+    "transcript_size_bytes INTEGER NOT NULL DEFAULT 0",
+    "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
+    "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+    "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
+    "global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+    "skills_size_bytes INTEGER NOT NULL DEFAULT 0",
+    "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
+    "m1_seed_used INTEGER NOT NULL DEFAULT 0",
+    "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
+    "m3_compress_injected INTEGER NOT NULL DEFAULT 0",
+    "m1_summary_extracted INTEGER NOT NULL DEFAULT 0",
+    "m3_compress_applied INTEGER NOT NULL DEFAULT 0",
+    "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
+    "output_multiplier REAL NOT NULL DEFAULT 1.5",
+    "output_rolling_avg REAL NOT NULL DEFAULT 0",
+    "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+    "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+  ];
+  for (const col of DB_NEW_COLUMNS) {
+    try { usageDb.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
+  }
+  usageDb.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
+  usageDb.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
+  usageDb.exec('CREATE INDEX IF NOT EXISTS idx_group_id ON usage(group_id)');
+  usageDb.exec('CREATE INDEX IF NOT EXISTS idx_session  ON usage(session_id)');
+  usageDb.exec('CREATE INDEX IF NOT EXISTS idx_model    ON usage(model)');
+  usageDb.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_run_ts ON usage(ts, container)');
+  const upsertUsage = usageDb.prepare(`INSERT INTO usage (
+    ts, container, input_tokens, output_tokens,
+    session_id, model, group_id,
+    transcript_size_bytes, seed_size_bytes,
+    claudemd_size_bytes, claudemd_size_after_bytes,
+    global_claudemd_size_bytes, skills_size_bytes,
+    m1_compaction_injected, m1_seed_used,
+    m2_constraint_injected, m3_compress_injected,
+    m1_summary_extracted, m3_compress_applied, m3_validation_passed,
+    output_multiplier, output_rolling_avg,
+    cache_read_tokens, cache_creation_tokens
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(ts, container) DO UPDATE SET
+    input_tokens=excluded.input_tokens,
+    output_tokens=excluded.output_tokens,
+    session_id=excluded.session_id,
+    model=excluded.model,
+    m1_summary_extracted=excluded.m1_summary_extracted,
+    m3_compress_applied=excluded.m3_compress_applied,
+    m3_validation_passed=excluded.m3_validation_passed,
+    cache_read_tokens=excluded.cache_read_tokens,
+    cache_creation_tokens=excluded.cache_creation_tokens
+  `);
 
   for await (const message of query({
     prompt: stream,
@@ -893,118 +983,53 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
         compactStats,
         tokenUsage: (totalInTokens > 0 || totalOutTokens > 0) ? { in: totalInTokens, out: totalOutTokens } : undefined,
       });
+
+      // Upsert DB after every result so the record exists even if the container
+      // is killed (OOM/timeout) before the loop finishes.
+      if (totalInTokens > 0 || totalOutTokens > 0) {
+        try {
+          upsertUsage.run(
+            runTs, containerInput.groupFolder, totalInTokens, totalOutTokens,
+            newSessionId ?? null,
+            capturedModel,
+            containerInput.groupFolder,
+            transcriptSize,
+            containerInput.compactSeed ? Buffer.byteLength(containerInput.compactSeed, 'utf-8') : 0,
+            claudeMdBytes,
+            compressedMdContent !== null ? Buffer.byteLength(compressedMdContent, 'utf-8') : claudeMdBytes,
+            globalClaudeMdBytes,
+            skillsBytes,
+            compactInstruction ? 1 : 0,
+            (containerInput.compactSeed && !sessionId) ? 1 : 0,
+            injectConstraint ? 1 : 0,
+            claudeMdCompressInstruction ? 1 : 0,
+            summaryWasWritten ? 1 : 0,
+            m3CompressApplied ? 1 : 0,
+            m3ValidationPassed ? 1 : 0,
+            tokenOptState.outputMultiplier,
+            recentAvg,
+            totalCacheReadTokens,
+            totalCacheCreationTokens,
+          );
+        } catch (err) {
+          log(`Failed to upsert usage: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
   }
 
-  // ── 循环结束后：写 DB（用累计 token，一条记录代表整个 query）──────────────
+  // ── 循环结束后：关闭 DB，写 JSONL 备份 ──────────────────────────────────
   if (totalInTokens > 0 || totalOutTokens > 0) {
     try {
-      const ts = new Date().toISOString();
-      const container = containerInput.groupFolder;
-      const sharedUsageDir = `${WORKSPACE_DIR}/shared/usage`;
-      fs.mkdirSync(sharedUsageDir, { recursive: true });
-      const { DatabaseSync } = await import('node:sqlite');
-      const db = new DatabaseSync(path.join(sharedUsageDir, 'usage.db'));
-      db.exec(`CREATE TABLE IF NOT EXISTS usage (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT NOT NULL,
-        container TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL,
-        output_tokens INTEGER NOT NULL,
-        session_id TEXT,
-        model TEXT,
-        group_id TEXT NOT NULL DEFAULT '',
-        transcript_size_bytes INTEGER NOT NULL DEFAULT 0,
-        seed_size_bytes INTEGER NOT NULL DEFAULT 0,
-        claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
-        claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
-        global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
-        skills_size_bytes INTEGER NOT NULL DEFAULT 0,
-        m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
-        m1_seed_used INTEGER NOT NULL DEFAULT 0,
-        m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
-        m3_compress_injected INTEGER NOT NULL DEFAULT 0,
-        m1_summary_extracted INTEGER NOT NULL DEFAULT 0,
-        m3_compress_applied INTEGER NOT NULL DEFAULT 0,
-        m3_validation_passed INTEGER NOT NULL DEFAULT 0,
-        output_multiplier REAL NOT NULL DEFAULT 1.5,
-        output_rolling_avg REAL NOT NULL DEFAULT 0,
-        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-        cache_creation_tokens INTEGER NOT NULL DEFAULT 0
-      )`);
-      const NEW_COLUMNS = [
-        "session_id TEXT",
-        "model TEXT",
-        "group_id TEXT NOT NULL DEFAULT ''",
-        "transcript_size_bytes INTEGER NOT NULL DEFAULT 0",
-        "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
-        "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
-        "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
-        "global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
-        "skills_size_bytes INTEGER NOT NULL DEFAULT 0",
-        "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
-        "m1_seed_used INTEGER NOT NULL DEFAULT 0",
-        "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
-        "m3_compress_injected INTEGER NOT NULL DEFAULT 0",
-        "m1_summary_extracted INTEGER NOT NULL DEFAULT 0",
-        "m3_compress_applied INTEGER NOT NULL DEFAULT 0",
-        "m3_validation_passed INTEGER NOT NULL DEFAULT 0",
-        "output_multiplier REAL NOT NULL DEFAULT 1.5",
-        "output_rolling_avg REAL NOT NULL DEFAULT 0",
-        "cache_read_tokens INTEGER NOT NULL DEFAULT 0",
-        "cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
-      ];
-      for (const col of NEW_COLUMNS) {
-        try { db.exec(`ALTER TABLE usage ADD COLUMN ${col}`); } catch { /* already exists */ }
-      }
-      db.exec('CREATE INDEX IF NOT EXISTS idx_ts ON usage(ts)');
-      db.exec('CREATE INDEX IF NOT EXISTS idx_container ON usage(container)');
-      db.exec('CREATE INDEX IF NOT EXISTS idx_group_id ON usage(group_id)');
-      db.exec('CREATE INDEX IF NOT EXISTS idx_session  ON usage(session_id)');
-      db.exec('CREATE INDEX IF NOT EXISTS idx_model    ON usage(model)');
-      // Use cumulative totals so /input always matches the watermark
-      db.prepare(`INSERT INTO usage (
-        ts, container, input_tokens, output_tokens,
-        session_id, model, group_id,
-        transcript_size_bytes, seed_size_bytes,
-        claudemd_size_bytes, claudemd_size_after_bytes,
-        global_claudemd_size_bytes, skills_size_bytes,
-        m1_compaction_injected, m1_seed_used,
-        m2_constraint_injected, m3_compress_injected,
-        m1_summary_extracted, m3_compress_applied, m3_validation_passed,
-        output_multiplier, output_rolling_avg,
-        cache_read_tokens, cache_creation_tokens
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        ts, container, totalInTokens, totalOutTokens,
-        newSessionId ?? null,
-        capturedModel,
-        containerInput.groupFolder,
-        transcriptSize,
-        containerInput.compactSeed ? Buffer.byteLength(containerInput.compactSeed, 'utf-8') : 0,
-        claudeMdBytes,
-        compressedMdContent !== null ? Buffer.byteLength(compressedMdContent, 'utf-8') : claudeMdBytes,
-        globalClaudeMdBytes,
-        skillsBytes,
-        compactInstruction ? 1 : 0,
-        (containerInput.compactSeed && !sessionId) ? 1 : 0,
-        injectConstraint ? 1 : 0,
-        claudeMdCompressInstruction ? 1 : 0,
-        summaryWasWritten ? 1 : 0,
-        m3CompressApplied ? 1 : 0,
-        m3ValidationPassed ? 1 : 0,
-        tokenOptState.outputMultiplier,
-        recentAvg,
-        totalCacheReadTokens,
-        totalCacheCreationTokens,
-      );
-      db.close();
+      usageDb.close();
       // Legacy JSONL (backward compat)
-      const entry = JSON.stringify({ ts, in: totalInTokens, out: totalOutTokens, total: totalInTokens + totalOutTokens }) + '\n';
+      const container = containerInput.groupFolder;
+      const entry = JSON.stringify({ ts: runTs, in: totalInTokens, out: totalOutTokens, total: totalInTokens + totalOutTokens }) + '\n';
       fs.appendFileSync(path.join(sharedUsageDir, `${container}.json`), entry);
       fs.mkdirSync(`${WORKSPACE_DIR}/group/data`, { recursive: true });
       fs.appendFileSync(`${WORKSPACE_DIR}/group/data/usage.json`, entry);
     } catch (err) {
-      log(`Failed to write usage: ${err instanceof Error ? err.message : String(err)}`);
+      log(`Failed to write usage JSONL: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // ── 更新 Token 优化状态 ──────────────────────────────────────────────

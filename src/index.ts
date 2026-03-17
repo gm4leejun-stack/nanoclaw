@@ -340,7 +340,7 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   let pendingCompactNotify = false;
   let pendingCompactStats:
-    | { transcriptBytes: number; seedBytes: number }
+    | { preCompactTokens: number; seedTokens: number }
     | undefined;
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
@@ -353,7 +353,7 @@ async function runAgent(
           delete sessions[group.folder];
           deleteSession(group.folder);
           pendingCompactNotify = true;
-          pendingCompactStats = output.compactStats;
+          pendingCompactStats = output.compactStats as { preCompactTokens: number; seedTokens: number } | undefined;
         }
         await onOutput(output);
       }
@@ -405,11 +405,10 @@ async function runAgent(
       const channel = findChannel(channels, chatJid);
       let compactMsg = '📦 对话历史已自动整理，下条消息将轻装开始新对话～';
       if (pendingCompactStats) {
-        const { transcriptBytes, seedBytes } = pendingCompactStats;
-        const fromKB = Math.round(transcriptBytes / 1024);
-        const toKB = (seedBytes / 1024).toFixed(1);
-        const savedPct = Math.round((1 - seedBytes / transcriptBytes) * 100);
-        compactMsg = `📦 对话历史已自动压缩整理 ✨\n🗜️ ${fromKB}KB → ${toKB}KB，节省 ${savedPct}%\n🚀 下条消息轻装出发～`;
+        const { preCompactTokens, seedTokens } = pendingCompactStats;
+        const fmtTok = (t: number) => t >= 1000 ? `${(t / 1000).toFixed(1)}K` : String(t);
+        const savedPct = preCompactTokens > 0 ? Math.round((1 - seedTokens / preCompactTokens) * 100) : 0;
+        compactMsg = `📦 对话历史已自动压缩整理 ✨\n🗜️ ${fmtTok(preCompactTokens)} token → ${fmtTok(seedTokens)} token，节省 ${savedPct}%\n🚀 下条消息轻装出发～`;
       }
       await channel?.sendMessage(chatJid, compactMsg);
     }
@@ -1115,6 +1114,7 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
       `
     SELECT input_tokens, output_tokens,
            transcript_size_bytes, seed_size_bytes, claudemd_size_bytes,
+           global_claudemd_size_bytes, skills_size_bytes,
            cache_read_tokens, cache_creation_tokens,
            model, ts, container
     FROM usage
@@ -1147,6 +1147,8 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   const transcriptBytes = safe(row['transcript_size_bytes']);
   const seedBytes = safe(row['seed_size_bytes']);
   const claudemdBytes = safe(row['claudemd_size_bytes']);
+  const globalClaudemdBytes = safe(row['global_claudemd_size_bytes']);
+  const skillsBytes = safe(row['skills_size_bytes']);
   const cacheRead = safe(row['cache_read_tokens']);
   const cacheCreate = safe(row['cache_creation_tokens']);
   const model = String(row['model'] || 'unknown');
@@ -1156,8 +1158,10 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   const transcriptTok = bytesToTok(transcriptBytes);
   const seedTok = bytesToTok(seedBytes);
   const claudemdTok = bytesToTok(claudemdBytes);
-  // 其余部分（当前消息 + 工具调用等）
-  const otherTok = Math.max(0, totalIn - transcriptTok - seedTok - claudemdTok);
+  const globalClaudemdTok = bytesToTok(globalClaudemdBytes);
+  const skillsTok = bytesToTok(skillsBytes);
+  // 残差：工具定义 + 当前消息（SDK 注入，无法直接测量）
+  const otherTok = Math.max(0, totalIn - transcriptTok - seedTok - claudemdTok - globalClaudemdTok - skillsTok);
 
   // 北京时间
   const cstTs =
@@ -1175,20 +1179,25 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   msg += `🕐 ${cstTs}\n`;
   msg += `🤖 ${model}\n\n`;
   msg += `─────────────────\n`;
-  msg += `📜 对话历史 transcript: ${bar(transcriptTok, totalIn)}\n`;
-  msg += `   原始大小: ${fmtBytes(transcriptBytes)}\n`;
+  msg += `📜 对话历史: ${bar(transcriptTok, totalIn)}\n`;
   if (seedBytes > 0) {
     msg += `🌱 压缩摘要 seed: ${bar(seedTok, totalIn)}\n`;
-    msg += `   原始大小: ${fmtBytes(seedBytes)}\n`;
   }
-  msg += `📋 系统提示 CLAUDE.md: ${bar(claudemdTok, totalIn)}\n`;
-  msg += `   原始大小: ${fmtBytes(claudemdBytes)}\n`;
+  msg += `📋 CLAUDE.md: ${bar(claudemdTok, totalIn)}\n`;
+  if (globalClaudemdTok > 0) {
+    msg += `🌐 Global MD: ${bar(globalClaudemdTok, totalIn)}\n`;
+  }
+  if (skillsTok > 0) {
+    msg += `🛠 Skills: ${bar(skillsTok, totalIn)}\n`;
+  }
   if (otherTok > 0) {
-    msg += `💬 当前消息+工具等: ${bar(otherTok, totalIn)}\n`;
+    msg += `💬 工具+当前消息: ${bar(otherTok, totalIn)}\n`;
   }
   msg += `─────────────────\n`;
   msg += `⬆️ Input 合计: ${fmtK(totalIn)}\n`;
   if (cacheRead > 0 || cacheCreate > 0) {
+    const cacheFresh = Math.max(0, totalIn - cacheRead - cacheCreate);
+    msg += `  ├ 新鲜处理: ${fmtK(cacheFresh)}\n`;
     msg += `  ├ 缓存命中: ${fmtK(cacheRead)}\n`;
     msg += `  └ 缓存写入: ${fmtK(cacheCreate)}\n`;
   }

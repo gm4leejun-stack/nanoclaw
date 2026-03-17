@@ -55,7 +55,10 @@ interface SessionsIndex {
 
 interface TokenOptState {
   // 机制一：Inline Compaction
-  lastCompactTokens: number;          // 上次 compaction 时的累计 token 数
+  lastCompactTokens: number;          // 上次 compaction 后的累计 token 数（含压缩轮次）
+  m1IncrementThreshold: number;       // 自适应增量阈值，初始 60000
+  awaitingPostCompactMeasure: boolean; // 等待下一轮测量压缩效果
+  lastPreCompactIncrement: number;    // 压缩触发时的增量（用于 dropRatio 分母）
 
   // 机制二：响应长度控制
   totalInputTokens: number;           // 累计 input token（用于条件一周期触发）
@@ -68,8 +71,12 @@ interface TokenOptState {
 
 const WORKSPACE_DIR = process.env.NANOCLAW_WORKSPACE || '/workspace';
 const TOKEN_OPT_STATE_FILE = `${WORKSPACE_DIR}/shared/token-opt-state.json`;
-function getM1Threshold(): number {
-  return parseInt(process.env.NANOCLAW_OPT_M1_THRESHOLD || '') || 80 * 1024;
+const M1_ABSOLUTE_CEILING = 150_000;   // 固定安全红线，不自适应
+const M1_THRESHOLD_MIN = 30_000;
+const M1_THRESHOLD_MAX = 120_000;
+const M1_THRESHOLD_INIT = 60_000;
+function getM1IncrementThreshold(state: TokenOptState): number {
+  return parseInt(process.env.NANOCLAW_OPT_M1_THRESHOLD || '') || state.m1IncrementThreshold || M1_THRESHOLD_INIT;
 }
 function getM2Period(): number {
   return parseInt(process.env.NANOCLAW_OPT_M2_PERIOD || '') || 20000;
@@ -89,6 +96,9 @@ function loadTokenOptState(): TokenOptState {
   } catch { /* ignore */ }
   return {
     lastCompactTokens: 0,
+    m1IncrementThreshold: M1_THRESHOLD_INIT,
+    awaitingPostCompactMeasure: false,
+    lastPreCompactIncrement: 0,
     totalInputTokens: 0,
     lastConstraintInjectedAt: 0,
     recentOutputTokens: [],
@@ -585,13 +595,16 @@ export async function runQuery(
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = `${WORKSPACE_DIR}/global/CLAUDE.md`;
   let globalClaudeMd: string | undefined;
+  let globalClaudeMdBytes = 0;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+    globalClaudeMdBytes = Buffer.byteLength(globalClaudeMd, 'utf-8');
   }
 
   // Load skill prompts from /workspace/group/.skills/
   const skillsDir = `${WORKSPACE_DIR}/group/.skills`;
   let skillPrompts = '';
+  let skillsBytes = 0;
   if (fs.existsSync(skillsDir)) {
     const skillFiles = fs.readdirSync(skillsDir).filter(f => f.endsWith('.md')).sort();
     for (const file of skillFiles) {
@@ -599,6 +612,7 @@ export async function runQuery(
       skillPrompts += '\n\n' + content;
       log(`Loaded skill: ${file}`);
     }
+    skillsBytes = Buffer.byteLength(skillPrompts, 'utf-8');
   }
 
   // ── 机制一：Inline Compaction ────────────────────────────────────────────────
@@ -606,8 +620,12 @@ export async function runQuery(
   const transcriptSize = getTranscriptSize(sessionId);
   const existingSeed = loadExistingSeed(containerInput.groupFolder);
 
-  if (transcriptSize > getM1Threshold()) {
-    log(`[token-opt] Transcript size ${transcriptSize} bytes > threshold, injecting compact instruction`);
+  // M1 触发：基于 token 增量，而非 transcript 文件字节数
+  const m1Increment = tokenOptState.totalInputTokens - tokenOptState.lastCompactTokens;
+  const m1ShouldCompact = m1Increment > getM1IncrementThreshold(tokenOptState) || m1Increment > M1_ABSOLUTE_CEILING;
+
+  if (m1ShouldCompact) {
+    log(`[token-opt] M1 increment ${m1Increment} tokens > threshold (${getM1IncrementThreshold(tokenOptState)} | ceiling ${M1_ABSOLUTE_CEILING}), injecting compact instruction`);
     compactInstruction = `
 
 <hidden_instruction>
@@ -767,14 +785,15 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
       // ── 机制一：提取 compact summary ─────────────────────────────────────
       let cleanResult = textResult;
       let summaryWasWritten = false;
-      let compactStats: { transcriptBytes: number; seedBytes: number } | undefined;
+      let compactStats: { preCompactTokens: number; seedTokens: number } | undefined;
       if (textResult && compactInstruction) {
         const summary = extractCompactSummary(textResult);
         if (summary) {
           writeCompactSeed(summary);
           summaryWasWritten = true;
-          compactStats = { transcriptBytes: transcriptSize, seedBytes: Buffer.byteLength(summary, 'utf-8') };
-          log(`[token-opt] Compact summary extracted and written (${summary.length} chars)`);
+          const seedTokens = Math.round(Buffer.byteLength(summary, 'utf-8') / 3.5);
+          compactStats = { preCompactTokens: m1Increment + inTokens, seedTokens };
+          log(`[token-opt] Compact summary extracted and written (${summary.length} chars, seedTokens=${seedTokens})`);
           // 从回复中移除 compact_summary 标签，不展示给用户
           cleanResult = textResult.replace(/<compact_summary>[\s\S]*?<\/compact_summary>/g, '').trim();
         } else {
@@ -813,8 +832,9 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             if (fbSummary) {
               writeCompactSeed(fbSummary);
               summaryWasWritten = true;
-              compactStats = { transcriptBytes: transcriptSize, seedBytes: Buffer.byteLength(fbSummary, 'utf-8') };
-              log(`[token-opt] M1: fallback compaction succeeded, seed written (${fbSummary.length} chars)`);
+              const fbSeedTokens = Math.round(Buffer.byteLength(fbSummary, 'utf-8') / 3.5);
+              compactStats = { preCompactTokens: m1Increment + inTokens, seedTokens: fbSeedTokens };
+              log(`[token-opt] M1: fallback compaction succeeded, seed written (${fbSummary.length} chars, seedTokens=${fbSeedTokens})`);
             } else {
               log('[token-opt] M1: fallback compaction also produced no summary, skipping');
             }
@@ -879,6 +899,8 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             seed_size_bytes INTEGER NOT NULL DEFAULT 0,
             claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
             claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0,
+            global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0,
+            skills_size_bytes INTEGER NOT NULL DEFAULT 0,
             m1_compaction_injected INTEGER NOT NULL DEFAULT 0,
             m1_seed_used INTEGER NOT NULL DEFAULT 0,
             m2_constraint_injected INTEGER NOT NULL DEFAULT 0,
@@ -899,6 +921,8 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             "seed_size_bytes INTEGER NOT NULL DEFAULT 0",
             "claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
             "claudemd_size_after_bytes INTEGER NOT NULL DEFAULT 0",
+            "global_claudemd_size_bytes INTEGER NOT NULL DEFAULT 0",
+            "skills_size_bytes INTEGER NOT NULL DEFAULT 0",
             "m1_compaction_injected INTEGER NOT NULL DEFAULT 0",
             "m1_seed_used INTEGER NOT NULL DEFAULT 0",
             "m2_constraint_injected INTEGER NOT NULL DEFAULT 0",
@@ -924,20 +948,23 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             session_id, model, group_id,
             transcript_size_bytes, seed_size_bytes,
             claudemd_size_bytes, claudemd_size_after_bytes,
+            global_claudemd_size_bytes, skills_size_bytes,
             m1_compaction_injected, m1_seed_used,
             m2_constraint_injected, m3_compress_injected,
             m1_summary_extracted, m3_compress_applied, m3_validation_passed,
             output_multiplier, output_rolling_avg,
             cache_read_tokens, cache_creation_tokens
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
             ts, container, inTokens, outTokens,
             newSessionId ?? null,
             capturedModel,
             containerInput.groupFolder,
             transcriptSize,
-            containerInput.compactSeed?.length ?? 0,
+            containerInput.compactSeed ? Buffer.byteLength(containerInput.compactSeed, 'utf-8') : 0,
             claudeMdBytes,
             compressedMdContent !== null ? Buffer.byteLength(compressedMdContent, 'utf-8') : claudeMdBytes,
+            globalClaudeMdBytes,
+            skillsBytes,
             compactInstruction ? 1 : 0,
             (containerInput.compactSeed && !sessionId) ? 1 : 0,
             injectConstraint ? 1 : 0,
@@ -962,9 +989,52 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
 
         // ── 更新 Token 优化状态 ──────────────────────────────────────────────
         tokenOptState.totalInputTokens += inTokens;
+
+        // M1 自适应：上次压缩后的首轮效果评估
+        if (tokenOptState.awaitingPostCompactMeasure) {
+          if (!summaryWasWritten) {
+            // 正常情况：评估压缩效果并调整阈值
+            const dropRatio = tokenOptState.lastPreCompactIncrement > 0
+              ? (tokenOptState.lastPreCompactIncrement - inTokens) / tokenOptState.lastPreCompactIncrement
+              : 0;
+            if (tokenOptState.lastPreCompactIncrement > M1_ABSOLUTE_CEILING) {
+              // 优先级1：触发太晚，需要激进收紧
+              tokenOptState.m1IncrementThreshold = Math.min(
+                Math.floor(tokenOptState.m1IncrementThreshold * 0.7),
+                M1_THRESHOLD_INIT,
+              );
+            } else if (dropRatio < 0.15) {
+              // 优先级2：压缩几乎无效，轻微收紧
+              tokenOptState.m1IncrementThreshold = Math.max(
+                Math.floor(tokenOptState.m1IncrementThreshold * 0.9),
+                M1_THRESHOLD_MIN,
+              );
+            } else if (dropRatio > 0.40) {
+              // 优先级3：压缩效果好，适当放宽
+              tokenOptState.m1IncrementThreshold = Math.min(
+                Math.floor(tokenOptState.m1IncrementThreshold * 1.1),
+                M1_THRESHOLD_MAX,
+              );
+            }
+            log(`[token-opt] M1 adaptive: dropRatio=${(dropRatio * 100).toFixed(1)}% lastPreCompact=${tokenOptState.lastPreCompactIncrement} newThreshold=${tokenOptState.m1IncrementThreshold}`);
+          } else {
+            // back-to-back 压缩：跳过效果评估，避免数据污染
+            log('[token-opt] M1 adaptive: back-to-back compaction, skipping effect evaluation');
+          }
+          tokenOptState.awaitingPostCompactMeasure = false;
+        }
+
+        // M1 压缩成功后：记录 lastCompactTokens，开启下轮效果评估
+        if (summaryWasWritten) {
+          tokenOptState.lastPreCompactIncrement = m1Increment + inTokens;
+          tokenOptState.lastCompactTokens = tokenOptState.totalInputTokens;
+          tokenOptState.awaitingPostCompactMeasure = true;
+          log(`[token-opt] M1 compact done: lastCompactTokens=${tokenOptState.lastCompactTokens}, lastPreCompactIncrement=${tokenOptState.lastPreCompactIncrement}`);
+        }
+
         updateOutputTracking(tokenOptState, outTokens, injectConstraint);
         saveTokenOptState(tokenOptState);
-        log(`[token-opt] totalInput=${tokenOptState.totalInputTokens}, lastOut=${outTokens}, multiplier=${tokenOptState.outputMultiplier.toFixed(2)}`);
+        log(`[token-opt] totalInput=${tokenOptState.totalInputTokens}, increment=${m1Increment}, m1Threshold=${tokenOptState.m1IncrementThreshold}, lastOut=${outTokens}`);
       }
 
       writeOutput({
@@ -1003,7 +1073,7 @@ async function main(): Promise<void> {
   // OPT_TEST：快照文件，记录初始状态，注入低阈值
   const isOptTest = process.env.NANOCLAW_OPT_TEST === '1';
   let optSnap: Record<string, string | null> = {};
-  let optInitState = { seedBefore: '', claudeMdBefore: '', lastInjectAtBefore: 0, transcriptBytes: 0, claudeMdBytes: 0, totalInputTokens: 0 };
+  let optInitState = { seedBefore: '', claudeMdBefore: '', lastInjectAtBefore: 0, m1IncrementBefore: 0, claudeMdBytes: 0, totalInputTokens: 0, lastCompactTokensBefore: 0 };
 
   if (isOptTest) {
     const groupDir = `${WORKSPACE_DIR}/group`;
@@ -1012,11 +1082,12 @@ async function main(): Promise<void> {
     const seedPath = `${groupDir}/.compact-seed.md`;
     const statePath = `${sharedDir}/token-opt-state.json`;
 
-    // 记录初始大小
-    optInitState.transcriptBytes = getTranscriptSize(containerInput.sessionId);
+    // 记录初始状态
     optInitState.claudeMdBytes = fs.existsSync(claudeMdPath) ? fs.statSync(claudeMdPath).size : 0;
     const stateJson = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf-8')) : {};
     optInitState.totalInputTokens = stateJson.totalInputTokens || 0;
+    optInitState.lastCompactTokensBefore = stateJson.lastCompactTokens || 0;
+    optInitState.m1IncrementBefore = optInitState.totalInputTokens - optInitState.lastCompactTokensBefore;
     optInitState.lastInjectAtBefore = stateJson.lastConstraintInjectedAt || 0;
     optInitState.seedBefore = fs.existsSync(seedPath) ? fs.readFileSync(seedPath, 'utf-8') : '';
     optInitState.claudeMdBefore = fs.existsSync(claudeMdPath) ? fs.readFileSync(claudeMdPath, 'utf-8') : '';
@@ -1028,17 +1099,19 @@ async function main(): Promise<void> {
       [statePath]: fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf-8') : null,
     };
 
-    // 计算测试阈值：min(当前大小 × 0.8, 真实阈值)，确保当前大小一定会触发
-    const testM1 = optInitState.transcriptBytes > 0
-      ? Math.min(Math.floor(optInitState.transcriptBytes * 0.8), 80 * 1024)
-      : 80 * 1024;
+    // 计算测试阈值
+    // M1：token 增量 × 0.8，确保当前增量一定会触发
+    const testM1Tokens = optInitState.m1IncrementBefore > 0
+      ? Math.min(Math.floor(optInitState.m1IncrementBefore * 0.8), M1_THRESHOLD_INIT)
+      : M1_THRESHOLD_INIT;
     const testM2 = optInitState.totalInputTokens > 0
       ? Math.min(Math.floor(optInitState.totalInputTokens * 0.8), 20000)
       : 20000;
     const testM3 = optInitState.claudeMdBytes > 0
       ? Math.min(Math.floor(optInitState.claudeMdBytes * 0.8), 10 * 1024)
       : 10 * 1024;
-    process.env.NANOCLAW_OPT_M1_THRESHOLD = String(testM1);
+    // env var 仍作为覆盖（getM1IncrementThreshold 读取）
+    process.env.NANOCLAW_OPT_M1_THRESHOLD = String(testM1Tokens);
     process.env.NANOCLAW_OPT_M2_PERIOD = String(testM2);
     process.env.NANOCLAW_OPT_M3_THRESHOLD = String(testM3);
 
@@ -1049,7 +1122,7 @@ async function main(): Promise<void> {
 
     // 覆盖 prompt 为最小测试字符串
     containerInput.prompt = '请简短回复："测试完成"。';
-    log(`[OPT_TEST] Snapshot taken, thresholds: M1=${testM1} M2=${testM2} M3=${testM3}, prompt overridden`);
+    log(`[OPT_TEST] Snapshot taken, thresholds: M1=${testM1Tokens}tokens M2=${testM2} M3=${testM3}, increment=${optInitState.m1IncrementBefore}, prompt overridden`);
   }
 
   // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.
@@ -1166,14 +1239,13 @@ async function main(): Promise<void> {
         const claudeMdAfter = fs.existsSync(claudeMdPath) ? fs.readFileSync(claudeMdPath, 'utf-8') : '';
         const stateAfter = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf-8')) : {};
 
-        // M1: 阈值条件（不依赖 Claude 是否真的输出了标签）
+        // M1：seed 文件实际变化判定
         const testM1Used = parseInt(process.env.NANOCLAW_OPT_M1_THRESHOLD || '0');
         const testM2Used = parseInt(process.env.NANOCLAW_OPT_M2_PERIOD || '0');
         const testM3Used = parseInt(process.env.NANOCLAW_OPT_M3_THRESHOLD || '0');
         const m1Triggered = seedAfter.length > 0 && seedAfter !== optInitState.seedBefore;
         const m2Triggered = (stateAfter.lastConstraintInjectedAt || 0) > optInitState.lastInjectAtBefore;
         const m3Triggered = optInitState.claudeMdBytes > 0 && optInitState.claudeMdBytes > testM3Used;
-        const m1SeedBytes = Buffer.byteLength(seedAfter, 'utf-8');
         const m3AfterBytes = Buffer.byteLength(claudeMdAfter, 'utf-8');
 
         // 恢复所有文件
@@ -1187,14 +1259,14 @@ async function main(): Promise<void> {
 
         // 数字格式化工具
         const addCommas = (n: string) => n.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        const fmtTok = (t: number) => t >= 1000 ? `${addCommas((t / 1000).toFixed(1))}K` : String(t);
         const fmtK = (b: number) => {
           const [i, d] = (b / 1024).toFixed(1).split('.');
           return `${addCommas(i)}.${d} K`;
         };
         const fmtTK = (t: number) => `${addCommas(Math.round(t / 1000).toString())} K`;
-        const fmtN = (n: number) => addCommas(Math.round(n).toString());
         const icon = (ok: boolean, skip: boolean) => skip ? '⏭️' : ok ? '✅' : '❌';
-        const m1Skip = optInitState.transcriptBytes === 0;
+        const m1Skip = optInitState.m1IncrementBefore === 0;
         const m2Skip = optInitState.totalInputTokens === 0;
         const m3Skip = optInitState.claudeMdBytes === 0;
 
@@ -1202,14 +1274,14 @@ async function main(): Promise<void> {
           '🔍 Token 优化测试报告',
           '',
           '📊 当前状态',
-          `  Session: ${fmtK(optInitState.transcriptBytes)}${m1Skip ? ' (无会话)' : ''}`,
+          `  M1 增量: ${fmtTok(optInitState.m1IncrementBefore)} tokens${m1Skip ? ' (无历史)' : ''}`,
           `  CLAUDE.md: ${fmtK(optInitState.claudeMdBytes)}${m3Skip ? ' (不存在)' : ''}`,
-          `  历史消耗 Input: ${fmtTK(optInitState.totalInputTokens)}（该群组所有对话累计）`,
+          `  累计 Input: ${fmtTK(optInitState.totalInputTokens)}（该群组所有对话累计）`,
           '',
           '⚙️ 测试阈值 (min(当前×0.8, 真实阈值))',
-          `  M1: ${fmtK(testM1Used)} | M2: ${fmtTK(testM2Used)} | M3: ${fmtK(testM3Used)}`,
+          `  M1: ${fmtTok(testM1Used)} tok | M2: ${fmtTK(testM2Used)} | M3: ${fmtK(testM3Used)}`,
           '',
-          `${icon(m1Triggered, m1Skip)} M1 对话历史自动压缩整理${m1Skip ? ' (跳过: 无会话)' : m1Triggered ? ` — 指令已注入 (${fmtK(optInitState.transcriptBytes)} → ${fmtK(testM1Used)})` : ' — 未触发'}`,
+          `${icon(m1Triggered, m1Skip)} M1 对话历史自动压缩整理${m1Skip ? ' (跳过: 无历史增量)' : m1Triggered ? ` — 指令已注入 (${fmtTok(optInitState.m1IncrementBefore)} → ${fmtTok(testM1Used)} tokens)` : ' — 未触发'}`,
           `${icon(m2Triggered, m2Skip)} M2 响应长度控制${m2Skip ? ' (跳过: 无 token 记录)' : m2Triggered ? ' — 约束已注入' : ' — 未触发'}`,
           `${icon(m3Triggered, m3Skip)} M3 CLAUDE.md 压缩${m3Skip ? ' (跳过: 文件不存在)' : m3Triggered ? ` — 指令已注入 (${fmtK(optInitState.claudeMdBytes)} → ${fmtK(testM3Used)})` : ' — 未触发'}`,
           '',

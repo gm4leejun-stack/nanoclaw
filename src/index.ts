@@ -353,7 +353,9 @@ async function runAgent(
           delete sessions[group.folder];
           deleteSession(group.folder);
           pendingCompactNotify = true;
-          pendingCompactStats = output.compactStats as { preCompactTokens: number; seedTokens: number } | undefined;
+          pendingCompactStats = output.compactStats as
+            | { preCompactTokens: number; seedTokens: number }
+            | undefined;
         }
         await onOutput(output);
       }
@@ -406,8 +408,12 @@ async function runAgent(
       let compactMsg = '📦 对话历史已自动整理，下条消息将轻装开始新对话～';
       if (pendingCompactStats) {
         const { preCompactTokens, seedTokens } = pendingCompactStats;
-        const fmtTok = (t: number) => t >= 1000 ? `${(t / 1000).toFixed(1)}K` : String(t);
-        const savedPct = preCompactTokens > 0 ? Math.round((1 - seedTokens / preCompactTokens) * 100) : 0;
+        const fmtTok = (t: number) =>
+          t >= 1000 ? `${(t / 1000).toFixed(1)}K` : String(t);
+        const savedPct =
+          preCompactTokens > 0
+            ? Math.round((1 - seedTokens / preCompactTokens) * 100)
+            : 0;
         compactMsg = `📦 对话历史已自动压缩整理 ✨\n🗜️ ${fmtTok(preCompactTokens)} token → ${fmtTok(seedTokens)} token，节省 ${savedPct}%\n🚀 下条消息轻装出发～`;
       }
       await channel?.sendMessage(chatJid, compactMsg);
@@ -1161,7 +1167,15 @@ async function buildInputBreakdownMessage(chatJid: string): Promise<string> {
   const globalClaudemdTok = bytesToTok(globalClaudemdBytes);
   const skillsTok = bytesToTok(skillsBytes);
   // 残差：工具定义 + 当前消息（SDK 注入，无法直接测量）
-  const otherTok = Math.max(0, totalIn - transcriptTok - seedTok - claudemdTok - globalClaudemdTok - skillsTok);
+  const otherTok = Math.max(
+    0,
+    totalIn -
+      transcriptTok -
+      seedTok -
+      claudemdTok -
+      globalClaudemdTok -
+      skillsTok,
+  );
 
   // 北京时间
   const cstTs =

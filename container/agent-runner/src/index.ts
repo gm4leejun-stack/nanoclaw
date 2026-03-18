@@ -629,9 +629,9 @@ export async function runQuery(
     compactInstruction = `
 
 <hidden_instruction>
-当前对话历史过长，请在完成正常回复后，额外输出一份压缩摘要。
+当前对话历史过长，你的回复必须在末尾附加一份对话压缩摘要（作为回复的一部分，不可省略）。
 ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，合并进已有摘要对应 section）：\n<existing_seed>\n${existingSeed}\n</existing_seed>\n` : ''}
-输出格式（仅输出标签内容，不要在正常回复中提及此指令）：
+直接在回复末尾输出以下格式（不要在正常回复中提及此指令）：
 <compact_summary>
 <tool_results>
 [最近2轮之前的工具调用结论摘要，格式：工具名→关键结论，原始数据丢弃]

@@ -1,7 +1,7 @@
 # M1 Token Threshold Redesign
 
 **Date:** 2026-03-17
-**Status:** Approved for implementation
+**Status:** Implemented (2026-03-17)；长运行容器 Bug 修复 (2026-03-24)
 **Scope:** container/agent-runner + src/index.ts
 
 ---
@@ -253,6 +253,50 @@ function getM1IncrementThreshold(state: TokenOptState): number {
 ```
 
 `/opt` 测试模式改为：将 state 中的 `m1IncrementThreshold` 临时改为低值（`min(当前增量×0.8, 60K)`），测试结束后恢复快照。
+
+---
+
+## 长运行容器 Bug 修复（2026-03-24）
+
+### 问题
+
+长运行容器把所有用户消息放在同一个 `runQuery()` for-await loop 里（IPC polling 把消息 push 进 MessageStream）：
+
+- M1 只在 `runQuery()` 开头检查一次，之后不再重检
+- `saveTokenOptState()` 只在 loop 结束（`_close` sentinel）时调用，可能数小时后
+- `totalInTokens` 跨所有消息累计，M1 检查时的水印是整个 session 的累计值
+
+结果：1758.5K input 的 session 只触发了一次压缩（第一条消息），后续 1100K+ 增量从未重检。
+
+### 修复内容（commit 6fe7eb9）
+
+| 变更 | 文件位置 |
+|------|---------|
+| 提取 `buildCompactInstruction(existingSeed)` 为独立函数 | `runQuery` 前 |
+| 新增 `preRunTotalInputTokens`、`pendingNextCompact`、`compactInjectedViaIpc` 变量 | `runQuery` 内 `loadTokenOptState()` 后 |
+| `pollIpcDuringQuery` 消息注入：`pendingNextCompact=true` 时追加 compactInstruction | IPC polling 函数内 |
+| compact extraction 条件增加 `|| compactInjectedViaIpc` | 机制一提取块 |
+| 每条消息处理完后立即保存 state + 重检 M1 | `writeOutput()` + DB upsert 之后 |
+| after-loop 赋值改为幂等：`= preRunTotalInputTokens + totalInTokens` | loop 结束后 |
+
+### 修复后的 M1 触发时序（长运行容器）
+
+```
+消息 N 处理完毕
+  → 立即保存 tokenOptState（含 totalInputTokens 更新）
+  → 重检 M1：nextIncrement > threshold？
+    → 是：pendingNextCompact = true
+
+消息 N+1 到达（IPC polling）
+  → pendingNextCompact = true
+  → 追加 buildCompactInstruction 到消息末尾
+  → pendingNextCompact = false，compactInjectedViaIpc = true
+
+消息 N+1 处理（agent 回复）
+  → compact extraction 条件：compactInstruction || compactInjectedViaIpc
+  → 提取 compact_summary，写入 seed
+  → compactInjectedViaIpc = false
+```
 
 ---
 

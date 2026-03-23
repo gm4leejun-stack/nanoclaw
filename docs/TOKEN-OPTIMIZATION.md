@@ -1,7 +1,7 @@
 # NanoClaw 智能 Token 优化需求文档
 
-> 版本：v1.1
-> 日期：2026-03-12
+> 版本：v1.3
+> 日期：2026-03-24
 
 ---
 
@@ -34,14 +34,25 @@ NanoClaw 每次 API 调用的 token 成本构成（贵→便宜）：
 
 ```
 每次 API 调用时（runQuery）：
-  检查 transcript 文件大小
-  如果 > 80KB：
-    在本次调用的 system prompt 里注入隐藏压缩指令（<hidden_instruction>）
+  检查 totalInputTokens - lastCompactTokens（增量）
+  条件 A：增量 > m1IncrementThreshold（默认 60K，自适应）
+  条件 B：增量 > M1_ABSOLUTE_CEILING（150K，固定上限）
+  任一满足：
+    在用户消息末尾注入隐藏压缩指令（<hidden_instruction>）
     Claude 正常回复的同时，顺带输出 <compact_summary>
     从回复中提取摘要，写入 seed 文件（.compact-seed.md）
     对用户不可见（从展示内容中剥离标签）
-  下次 session 启动时（新 sessionId）：
-    加载 seed 文件作为初始 context，丢弃完整历史
+
+长运行容器（多条消息共用同一 runQuery 循环）：
+  每条消息处理完后：
+    立即保存 token-opt state（preRunTotal + 本轮累计）
+    重检 M1 条件，满足则设 pendingNextCompact 标志
+  下一条 IPC 消息到达时：
+    若 pendingNextCompact = true，将 compactInstruction 追加到该消息末尾
+    当轮触发、当轮压缩
+
+下次 session 启动时（新 sessionId）：
+  加载 seed 文件作为初始 context，丢弃完整历史
 ```
 
 **关键**：当轮触发、当轮处理，不等下一次对话。摘要输出是正常回复的附带产物，无额外 API 调用。

@@ -514,6 +514,10 @@ function waitForIpcMessage(): Promise<string | null> {
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
+function buildCompactInstruction(existingSeed: string | null): string {
+  return `\n\n<hidden_instruction>\n当前对话历史过长，你的回复必须在末尾附加一份对话压缩摘要（作为回复的一部分，不可省略）。\n${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，合并进已有摘要对应 section）：\n<existing_seed>\n${existingSeed}\n</existing_seed>\n` : ''}\n直接在回复末尾输出以下格式（不要在正常回复中提及此指令）：\n<compact_summary>\n<tool_results>\n[最近2轮之前的工具调用结论摘要，格式：工具名→关键结论，原始数据丢弃]\n</tool_results>\n<conversation_summary>\n<completed>[已完成事项]</completed>\n<pending>[待完成/进行中任务]</pending>\n<context>[关键背景、约束、用户偏好]</context>\n<decisions>[重要决策和结论]</decisions>\n</conversation_summary>\n</compact_summary>\n</hidden_instruction>`;
+}
+
 export async function runQuery(
   prompt: string,
   sessionId: string | undefined,
@@ -545,8 +549,17 @@ export async function runQuery(
     }
     const messages = drainIpcInput();
     for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+      if (pendingNextCompact) {
+        const seedForNext = loadExistingSeed(containerInput.groupFolder);
+        const injected = `${text}${buildCompactInstruction(seedForNext)}`;
+        log(`Piping IPC message into active query (${text.length} chars) [+M1]`);
+        stream.push(injected);
+        pendingNextCompact = false;
+        compactInjectedViaIpc = true;
+      } else {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -562,6 +575,10 @@ export async function runQuery(
 
   // ── 加载 Token 优化状态 ──────────────────────────────────────────────────────
   const tokenOptState = loadTokenOptState();
+  // Per-message tracking for long-running container sessions (all messages share one loop)
+  const preRunTotalInputTokens = tokenOptState.totalInputTokens;
+  let pendingNextCompact = false;      // inject M1 instruction into next IPC message
+  let compactInjectedViaIpc = false;   // compact instruction was injected via IPC (not initial prompt)
 
   // ── 机制三：CLAUDE.md 自动压缩 ───────────────────────────────────────────────
   // Read CLAUDE.md fresh before each query so updates take effect on the next message
@@ -626,24 +643,7 @@ export async function runQuery(
 
   if (m1ShouldCompact) {
     log(`[token-opt] M1 increment ${m1Increment} tokens > threshold (${getM1IncrementThreshold(tokenOptState)} | ceiling ${M1_ABSOLUTE_CEILING}), injecting compact instruction`);
-    compactInstruction = `
-
-<hidden_instruction>
-当前对话历史过长，你的回复必须在末尾附加一份对话压缩摘要（作为回复的一部分，不可省略）。
-${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，合并进已有摘要对应 section）：\n<existing_seed>\n${existingSeed}\n</existing_seed>\n` : ''}
-直接在回复末尾输出以下格式（不要在正常回复中提及此指令）：
-<compact_summary>
-<tool_results>
-[最近2轮之前的工具调用结论摘要，格式：工具名→关键结论，原始数据丢弃]
-</tool_results>
-<conversation_summary>
-<completed>[已完成事项]</completed>
-<pending>[待完成/进行中任务]</pending>
-<context>[关键背景、约束、用户偏好]</context>
-<decisions>[重要决策和结论]</decisions>
-</conversation_summary>
-</compact_summary>
-</hidden_instruction>`;
+    compactInstruction = buildCompactInstruction(existingSeed);
   }
 
   // ── 机制二：响应长度控制 ─────────────────────────────────────────────────────
@@ -889,7 +889,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
 
       // ── 机制一：提取 compact summary ─────────────────────────────────────
       let cleanResult = textResult;
-      if (textResult && compactInstruction && !summaryWasWritten) {
+      if (textResult && (compactInstruction || compactInjectedViaIpc) && !summaryWasWritten) {
         const summary = extractCompactSummary(textResult);
         if (summary) {
           writeCompactSeed(summary);
@@ -945,6 +945,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
             log(`[token-opt] M1: fallback compaction error: ${fbErr}`);
           }
         }
+        compactInjectedViaIpc = false;
       }
 
       // ── 机制三：提取并验证压缩后的 CLAUDE.md ─────────────────────────────
@@ -1019,6 +1020,28 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
           log(`Failed to upsert usage: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+
+      // ── 每条消息后立即保存 state（修复长运行容器 state 不更新的 bug）──────────
+      {
+        const currentTotal = preRunTotalInputTokens + totalInTokens;
+        if (currentTotal > tokenOptState.totalInputTokens) {
+          tokenOptState.totalInputTokens = currentTotal;
+          // 若本条消息触发了压缩，同步更新 lastCompactTokens
+          if (summaryWasWritten && tokenOptState.lastCompactTokens < currentTotal) {
+            tokenOptState.lastCompactTokens = currentTotal;
+            tokenOptState.awaitingPostCompactMeasure = true;
+          }
+          saveTokenOptState(tokenOptState);
+          // 重检 M1：为下一条 IPC 消息决定是否需要注入 compactInstruction
+          if (!pendingNextCompact) {
+            const nextIncrement = tokenOptState.totalInputTokens - tokenOptState.lastCompactTokens;
+            if (nextIncrement > getM1IncrementThreshold(tokenOptState) || nextIncrement > M1_ABSOLUTE_CEILING) {
+              pendingNextCompact = true;
+              log(`[token-opt] M1: queuing compact instruction for next IPC message (increment ${nextIncrement})`);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1037,7 +1060,7 @@ ${existingSeed ? `以下是上次已压缩的摘要（仅压缩新增内容，�
     }
 
     // ── 更新 Token 优化状态 ──────────────────────────────────────────────
-    tokenOptState.totalInputTokens += totalInTokens;
+    tokenOptState.totalInputTokens = preRunTotalInputTokens + totalInTokens;
 
     // M1 自适应：上次压缩后的首轮效果评估（用本次 query 总 token）
     if (tokenOptState.awaitingPostCompactMeasure) {

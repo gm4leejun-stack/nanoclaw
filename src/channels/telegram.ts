@@ -189,10 +189,20 @@ export class TelegramChannel implements Channel {
         if (!msg) return;
         const timestamp = new Date(msg.date * 1000).toISOString();
         const senderName =
-          ctx.from?.first_name || ctx.from?.username || ctx.from?.id?.toString() || 'Unknown';
+          ctx.from?.first_name ||
+          ctx.from?.username ||
+          ctx.from?.id?.toString() ||
+          'Unknown';
         const sender = ctx.from?.id?.toString() || '';
-        const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-        this.opts.onChatMetadata(chatJid, timestamp, undefined, this.jidPrefix, isGroup);
+        const isGroup =
+          ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+        this.opts.onChatMetadata(
+          chatJid,
+          timestamp,
+          undefined,
+          this.jidPrefix,
+          isGroup,
+        );
         this.opts.onMessage(chatJid, {
           id: msg.message_id.toString(),
           chat_jid: chatJid,

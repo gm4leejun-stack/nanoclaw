@@ -66,17 +66,20 @@ export class TelegramChannel implements Channel {
   private botToken: string;
   protected jidPrefix: string;
   private extraCommands: { command: string; description: string }[];
+  private commandAliases: Record<string, string>;
 
   constructor(
     botToken: string,
     opts: TelegramChannelOpts,
     jidPrefix = 'tg',
     extraCommands: { command: string; description: string }[] = [],
+    commandAliases: Record<string, string> = {},
   ) {
     this.botToken = botToken;
     this.opts = opts;
     this.jidPrefix = jidPrefix;
     this.extraCommands = extraCommands;
+    this.commandAliases = commandAliases;
   }
 
   async connect(): Promise<void> {
@@ -176,6 +179,31 @@ export class TelegramChannel implements Channel {
       const chatJid = `${this.jidPrefix}:${ctx.chat.id}`;
       await this.opts.onStatus?.(chatJid);
     });
+
+    // Register command aliases — forward them as plain text to the AI
+    for (const [cmd, aliasText] of Object.entries(this.commandAliases)) {
+      this.bot.command(cmd, async (ctx) => {
+        const chatJid = `${this.jidPrefix}:${ctx.chat.id}`;
+        if (!this.opts.registeredGroups()[chatJid]) return;
+        const msg = ctx.message;
+        if (!msg) return;
+        const timestamp = new Date(msg.date * 1000).toISOString();
+        const senderName =
+          ctx.from?.first_name || ctx.from?.username || ctx.from?.id?.toString() || 'Unknown';
+        const sender = ctx.from?.id?.toString() || '';
+        const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+        this.opts.onChatMetadata(chatJid, timestamp, undefined, this.jidPrefix, isGroup);
+        this.opts.onMessage(chatJid, {
+          id: msg.message_id.toString(),
+          chat_jid: chatJid,
+          sender,
+          sender_name: senderName,
+          content: aliasText,
+          timestamp,
+          is_from_me: false,
+        });
+      });
+    }
 
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
@@ -331,7 +359,10 @@ export class TelegramChannel implements Channel {
             { command: 'ping', description: '检查 bot 是否在线' },
             { command: 'chatid', description: '获取当前 Chat ID' },
           ];
-          this.bot!.api.setMyCommands([...this.extraCommands, ...defaultCommands]).catch((err) =>
+          this.bot!.api.setMyCommands([
+            ...this.extraCommands,
+            ...defaultCommands,
+          ]).catch((err) =>
             logger.warn({ err }, 'Failed to register bot commands'),
           );
           resolve();

@@ -6,7 +6,7 @@ import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 
 const QUANT_API =
-  process.env.QUANT_CC_API || 'http://host.docker.internal:8001';
+  process.env.QUANT_CC_API || 'http://localhost:8001';
 
 function quantCcCallbackHandler(bot: Bot): void {
   bot.on('callback_query:data', async (ctx) => {

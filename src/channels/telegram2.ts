@@ -12,5 +12,5 @@ registerChannel('telegram2', (opts: ChannelOpts) => {
     logger.warn('Telegram2: TELEGRAM_BOT_TOKEN_2 not set, skipping');
     return null;
   }
-  return new TelegramChannel(token, opts);
+  return new TelegramChannel(token, opts, 'tg2');
 });

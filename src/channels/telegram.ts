@@ -67,6 +67,7 @@ export class TelegramChannel implements Channel {
   protected jidPrefix: string;
   private extraCommands: { command: string; description: string }[];
   private commandAliases: Record<string, string>;
+  private customHandlers?: (bot: Bot) => void;
 
   constructor(
     botToken: string,
@@ -74,12 +75,14 @@ export class TelegramChannel implements Channel {
     jidPrefix = 'tg',
     extraCommands: { command: string; description: string }[] = [],
     commandAliases: Record<string, string> = {},
+    customHandlers?: (bot: Bot) => void,
   ) {
     this.botToken = botToken;
     this.opts = opts;
     this.jidPrefix = jidPrefix;
     this.extraCommands = extraCommands;
     this.commandAliases = commandAliases;
+    this.customHandlers = customHandlers;
   }
 
   async connect(): Promise<void> {
@@ -347,6 +350,10 @@ export class TelegramChannel implements Channel {
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
+
+    if (this.customHandlers && this.bot) {
+      this.customHandlers(this.bot);
+    }
 
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {

@@ -9,5 +9,6 @@
 
 // telegram
 import './telegram.js';
+import './telegram2.js';
 
 // whatsapp

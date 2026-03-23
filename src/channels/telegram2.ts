@@ -12,5 +12,12 @@ registerChannel('telegram2', (opts: ChannelOpts) => {
     logger.warn('Telegram2: TELEGRAM_BOT_TOKEN_2 not set, skipping');
     return null;
   }
-  return new TelegramChannel(token, opts, 'tg2');
+  return new TelegramChannel(token, opts, 'tg2', [
+    { command: 'positions', description: '当前持仓' },
+    { command: 'summary', description: '账户汇总（实时市值）' },
+    { command: 'trades', description: '最近10笔成交' },
+    { command: 'rec', description: '最新 AI 建议' },
+    { command: 'market', description: '市场数据 + 技术指标' },
+    { command: 'help', description: '查看所有指令' },
+  ]);
 });

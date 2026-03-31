@@ -105,12 +105,15 @@ function formatRows(
   limit = 5,
 ): string {
   if (!rows.length) return '暂无数据';
-  return rows.slice(0, limit).map((row, idx) => {
-    const body = fields
-      .map(([key, label]) => `${label}: ${formatCompactValue(row[key])}`)
-      .join(' | ');
-    return `${idx + 1}. ${body}`;
-  }).join('\n');
+  return rows
+    .slice(0, limit)
+    .map((row, idx) => {
+      const body = fields
+        .map(([key, label]) => `${label}: ${formatCompactValue(row[key])}`)
+        .join(' | ');
+      return `${idx + 1}. ${body}`;
+    })
+    .join('\n');
 }
 
 function formatAccountSummary(data: QuantResponse): string {
@@ -171,15 +174,25 @@ function formatLatestRec(data: QuantResponse): string {
     `建议: ${formatCompactValue(row.recommendation_type)}`,
     `置信度: ${formatCompactValue(row.ai_confidence)}`,
   ];
-  const rationale = row.rationale ? `理由: ${previewText(String(row.rationale), 120)}` : '';
-  return ['🤖 最新 AI 建议', parts.join(' | '), rationale].filter(Boolean).join('\n');
+  const rationale = row.rationale
+    ? `理由: ${previewText(String(row.rationale), 120)}`
+    : '';
+  return ['🤖 最新 AI 建议', parts.join(' | '), rationale]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function formatMarketData(data: QuantResponse): string {
   if (!data || Array.isArray(data)) return '🌐 暂无市场数据';
   const row = data as Record<string, unknown>;
   const highlights: string[] = [];
-  for (const key of ['spy_price', 'qqq_price', 'vix', 'market_regime', 'sentiment']) {
+  for (const key of [
+    'spy_price',
+    'qqq_price',
+    'vix',
+    'market_regime',
+    'sentiment',
+  ]) {
     if (key in row) {
       highlights.push(`${key}: ${formatCompactValue(row[key])}`);
     }
@@ -231,8 +244,10 @@ async function handleQuantCommand(
     );
     await ctx.reply(formatter(data));
   } catch (err) {
-    const statusCode = err instanceof QuantApiError ? err.statusCode ?? null : null;
-    const errorType = err instanceof QuantApiError ? err.errorType : 'unknown_error';
+    const statusCode =
+      err instanceof QuantApiError ? (err.statusCode ?? null) : null;
+    const errorType =
+      err instanceof QuantApiError ? err.errorType : 'unknown_error';
     logger.error(
       {
         error: err,
@@ -329,8 +344,10 @@ async function handleFixedStrategyGet(ctx: any): Promise<void> {
     );
     await ctx.reply(text);
   } catch (err: any) {
-    const statusCode = err instanceof QuantApiError ? err.statusCode ?? null : null;
-    const errorType = err instanceof QuantApiError ? err.errorType : 'unknown_error';
+    const statusCode =
+      err instanceof QuantApiError ? (err.statusCode ?? null) : null;
+    const errorType =
+      err instanceof QuantApiError ? err.errorType : 'unknown_error';
     logger.error(
       {
         error: err,
@@ -414,8 +431,10 @@ async function handleFixedStrategyUpdate(ctx: any): Promise<void> {
     );
     await ctx.reply(lines.join('\n'));
   } catch (err: any) {
-    const statusCode = err instanceof QuantApiError ? err.statusCode ?? null : null;
-    const errorType = err instanceof QuantApiError ? err.errorType : 'unknown_error';
+    const statusCode =
+      err instanceof QuantApiError ? (err.statusCode ?? null) : null;
+    const errorType =
+      err instanceof QuantApiError ? err.errorType : 'unknown_error';
     logger.error(
       {
         error: err,

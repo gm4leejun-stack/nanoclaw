@@ -93,7 +93,12 @@ function createChannel() {
   return { channel, opts };
 }
 
-function mockFetchJson(body: unknown, ok = true, status = 200, statusText = 'OK') {
+function mockFetchJson(
+  body: unknown,
+  ok = true,
+  status = 200,
+  statusText = 'OK',
+) {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
   global.fetch = vi.fn().mockResolvedValue({
     ok,
@@ -182,9 +187,7 @@ describe('telegram2 command router', () => {
     expect(ctx.reply).toHaveBeenCalledWith(
       expect.stringContaining('📊 账户汇总'),
     );
-    expect(ctx.reply).toHaveBeenCalledWith(
-      expect.stringContaining('default'),
-    );
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('default'));
   });
 
   it('/rec and /market use direct Quant-CC endpoints', async () => {
@@ -247,7 +250,9 @@ describe('telegram2 command router', () => {
       'http://localhost:8001/api/positions',
       expect.objectContaining({ signal: expect.any(Object) }),
     );
-    expect(posCtx.reply).toHaveBeenCalledWith(expect.stringContaining('📌 当前持仓'));
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('📌 当前持仓'),
+    );
 
     mockFetchJson([
       {
@@ -262,18 +267,27 @@ describe('telegram2 command router', () => {
       'http://localhost:8001/api/recent_trades',
       expect.objectContaining({ signal: expect.any(Object) }),
     );
-    expect(tradesCtx.reply).toHaveBeenCalledWith(expect.stringContaining('🧾 最近成交'));
+    expect(tradesCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('🧾 最近成交'),
+    );
   });
 
   it('returns deterministic error and logs observability fields when API fails', async () => {
     const { channel } = createChannel();
     await channel.connect();
 
-    mockFetchJson({ detail: 'downstream error' }, false, 503, 'Service Unavailable');
+    mockFetchJson(
+      { detail: 'downstream error' },
+      false,
+      503,
+      'Service Unavailable',
+    );
     const ctx = { reply: vi.fn() };
     await triggerCommand('summary', ctx);
 
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('❌ 查询账户汇总失败'));
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('❌ 查询账户汇总失败'),
+    );
     expect((logger as any).error).toHaveBeenCalledWith(
       expect.objectContaining({
         command: 'summary',

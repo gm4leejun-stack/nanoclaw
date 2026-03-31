@@ -40,6 +40,7 @@ vi.mock('grammy', () => ({
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      setMyCommands: vi.fn().mockResolvedValue(undefined),
     };
 
     constructor(token: string) {
@@ -774,7 +775,7 @@ describe('TelegramChannel', () => {
       // Should not throw
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBeNull();
     });
 
     it('does nothing when bot is not initialized', async () => {

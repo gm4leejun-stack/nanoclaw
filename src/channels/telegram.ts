@@ -218,6 +218,10 @@ export class TelegramChannel implements Channel {
       });
     }
 
+    if (this.customHandlers && this.bot) {
+      this.customHandlers(this.bot);
+    }
+
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
@@ -351,9 +355,6 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    if (this.customHandlers && this.bot) {
-      this.customHandlers(this.bot);
-    }
 
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {

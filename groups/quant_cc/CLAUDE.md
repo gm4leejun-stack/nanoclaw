@@ -32,6 +32,12 @@
 - POST /api/update_cash — 更新现金
 - POST /api/sync_position — 同步持仓
 
+### 配置端点
+- POST /api/config/set — 保存配置值（如 FRED API Key）
+- GET /api/config/get?key=<key> — 读取配置值
+- GET /api/fixed_strategy — 查询固定策略阈值
+- POST /api/fixed_strategy/update — 更新固定策略阈值
+
 ## 快捷指令
 
 | 指令 | 动作 |
@@ -42,13 +48,20 @@
 | /rec 或 建议 | GET /api/latest_rec |
 | /market 或 行情 | GET /api/market_data |
 | /help 或 帮助 | 列出以上指令说明 |
-| /analysis 或 操作建议（自然语言变体均触发） | POST /api/run_analysis_batch |
+| 分析 <SYMBOL> / 看一下 <SYMBOL> / <SYMBOL> 怎么样（单只，自然语言变体） | POST /api/run_analysis {"symbol":"<SYMBOL>","asset_class":"B"}（A类ETF用"A"） |
+| /analysis 或 操作建议（不指定标的，全量分析） | POST /api/run_analysis_batch |
+| 强制刷新分析 / 重新拉数据分析（自然语言变体） | POST /api/run_analysis_batch {"force_refresh": true} |
+| 设置FRED Key <KEY> / 配置FRED密钥 | POST /api/config/set {"key":"fred_api_key","value":"<KEY>"} |
+| /fs 或 固定策略 | GET /api/fixed_strategy |
+| /fsu k=v... 或 更新固定策略 | POST /api/fixed_strategy/update（body 为阈值键值） |
 
 识别到以上关键词（含自然语言变体，如"当前持仓"、"最近成交"）时，直接调对应 API，不做额外推理。
 
 ## 行为规则
-0. **投资操作/分析/建议类请求** — 凡用户询问持仓操作、开仓建议、期权策略、操作分析等任何投资决策相关内容：
-   - 调 `POST http://host.docker.internal:8001/api/run_analysis_batch`（无需请求体）
+0. **投资操作/分析/建议类请求**：
+   - **指定单只标的**（如"分析AMZN"、"看一下NVDA"、"TSLA怎么样"）：调 `POST http://host.docker.internal:8001/api/run_analysis` 传 `{"symbol":"AMZN","asset_class":"B"}`；A类ETF（SPY/VOO/IVV/QQQ/QQQM/GLD/IAU/GDX/IBIT）用 `"asset_class":"A"`
+   - **未指定标的或全量分析**（如"操作建议"、"帮我看看"、"有什么建议"）：调 `POST http://host.docker.internal:8001/api/run_analysis_batch`（无需请求体）
+   - 强制刷新（用户明确要求重新拉数据）：调全量端点并传 `{"force_refresh": true}`
    - Quant-CC 会直接向用户推送分析卡片
    - 把返回 JSON 中的 `message` 字段原文转达给用户
    - **不自行推理、不自行格式化、不编造数据**
@@ -58,3 +71,12 @@
 3. 成交录入 → 解析后调 save_trade，确认告知用户
 4. 数据不足时说明缺什么，不猜测
 5. 账户更新 → 调 update_cash 或 sync_position
+6. **FRED Key 配置** — 当用户发送"设置FRED Key <KEY>"或"配置FRED密钥 <KEY>"时：
+   - 调 `POST /api/config/set` 传 `{"key":"fred_api_key","value":"<KEY>"}`
+   - 成功后告知用户"✅ FRED API Key 已保存，下次宏观数据刷新时生效"
+   - 如果 Quant-CC 推送了 FRED Key 配置引导消息，直接按上述流程处理用户回复
+7. **固定策略查询/更新**：
+   - 用户发送 `/fs` 或"固定策略"：调 `GET /api/fixed_strategy`，把关键阈值与版本返回给用户
+   - 用户发送 `/fsu key=value ...` 或"更新固定策略"：调 `POST /api/fixed_strategy/update`
+   - 仅允许更新键：`stoploss_pct / take_profit_pct / roll_dte_max / rebalance_threshold / open_signal_min`
+   - 更新成功后，原文转发 API 返回中的 `updated` 与 `version`，不自行改写

@@ -48,7 +48,7 @@
 | /rec 或 建议 | GET /api/latest_rec |
 | /market 或 行情 | GET /api/market_data |
 | /help 或 帮助 | 列出以上指令说明 |
-| 分析 <SYMBOL> / 看一下 <SYMBOL> / <SYMBOL> 怎么样（单只，自然语言变体） | POST /api/run_analysis {"symbol":"<SYMBOL>","asset_class":"B"}（A类ETF用"A"） |
+| 分析 <SYMBOL> / 看一下 <SYMBOL> / <SYMBOL> 怎么样（单只，自然语言变体） | 先 POST /api/run_analysis_async 入队，再轮询 GET /api/run_analysis_task?task_id=<id> 直到 succeeded/failed（A类ETF用"A"） |
 | /analysis 或 操作建议（不指定标的，全量分析） | POST /api/run_analysis_batch |
 | 强制刷新分析 / 重新拉数据分析（自然语言变体） | POST /api/run_analysis_batch {"force_refresh": true} |
 | 设置FRED Key <KEY> / 配置FRED密钥 | POST /api/config/set {"key":"fred_api_key","value":"<KEY>"} |
@@ -59,11 +59,19 @@
 
 ## 行为规则
 0. **投资操作/分析/建议类请求**：
-   - **指定单只标的**（如"分析AMZN"、"看一下NVDA"、"TSLA怎么样"）：调 `POST http://host.docker.internal:8001/api/run_analysis` 传 `{"symbol":"AMZN","asset_class":"B"}`；A类ETF（SPY/VOO/IVV/QQQ/QQQM/GLD/IAU/GDX/IBIT）用 `"asset_class":"A"`
+   - **指定单只标的**（如"分析AMZN"、"看一下NVDA"、"TSLA怎么样"）：
+     1) 调 `POST http://host.docker.internal:8001/api/run_analysis_async` 传 `{"symbol":"AMZN","asset_class":"B"}`；A类ETF（SPY/VOO/IVV/QQQ/QQQM/GLD/IAU/GDX/IBIT）用 `"asset_class":"A"`
+     2) 先回用户：`已提交任务，task_id=<id>，正在分析中...`
+     3) 轮询 `GET http://host.docker.internal:8001/api/run_analysis_task?task_id=<id>`（每 3 秒一次，最多 20 次）
+     4) `status=succeeded`：若结果含 `suppress_user_echo=true` 则不重复转发 `message`（避免“建议已推送”二次提示）；否则回传 `message`。`status=failed`：回传错误并建议重试
    - **未指定标的或全量分析**（如"操作建议"、"帮我看看"、"有什么建议"）：调 `POST http://host.docker.internal:8001/api/run_analysis_batch`（无需请求体）
-   - 强制刷新（用户明确要求重新拉数据）：调全量端点并传 `{"force_refresh": true}`
-   - Quant-CC 会直接向用户推送分析卡片
-   - 把返回 JSON 中的 `message` 字段原文转达给用户
+   - 强制刷新（用户明确要求重新拉数据）：
+     - 单只：`POST /api/run_analysis_async` 传 `{"force_refresh": true}`
+     - 全量：`POST /api/run_analysis_batch` 传 `{"force_refresh": true}`
+   - Quant-CC 会直接向用户推送分析卡片；轮询结果用于给用户补一条状态确认
+   - 【强约束】单只标的请求禁止调用 `POST /api/run_analysis`（同步端点）；必须走 async+轮询。
+   - 【强约束】轮询达到上限仍未终态时，回复“任务仍在处理中+task_id”，不要回复“引擎超时请重试”。
+   - 默认把返回 JSON 中的 `message` 原文转达；但若 `suppress_user_echo=true`，则不重复转发该 message
    - **不自行推理、不自行格式化、不编造数据**
    - 示例触发词（不限于此）：操作建议、开仓建议、持仓分析、帮我看看、有什么操作、要不要开仓
 1. 定时任务 → 调触发端点（/api/run_*），将返回结果直接发给用户，不重新分析

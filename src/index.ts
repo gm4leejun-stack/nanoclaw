@@ -7,6 +7,7 @@ import {
   DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  QUEUE_WAIT_TIMEOUT,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -65,10 +66,12 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let lastQueueAckTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const quantCcTaskMap: Record<string, Record<string, number>> = {};
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -90,6 +93,163 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+}
+
+function shouldSuppressQuantCcEcho(group: RegisteredGroup, text: string): boolean {
+  if (group.folder !== 'quant_cc') return false;
+  const cleaned = (text || '').trim();
+  if (!cleaned) return false;
+  // Suppress redundant completion ack; Quant-CC already pushes the real card.
+  return /^[A-Z0-9_.-]+\s+分析完成（rec_id=\d+）[，,]建议卡片已推送。?$/.test(cleaned);
+}
+
+
+function extractTicker(content: string): string | null {
+  const m = (content || '').toUpperCase().match(/\b[A-Z]{2,5}\b/g);
+  if (!m || m.length === 0) return null;
+  return m[m.length - 1] || null;
+}
+
+function isQuantCcAnalyzeIntent(content: string): boolean {
+  const text = (content || '').trim();
+  if (!text) return false;
+  if (text.includes('进度')) return false;
+  return /(分析|看一下|怎么看|怎么样|看\s*[A-Za-z]{2,5})/.test(text);
+}
+
+function isQuantCcProgressIntent(content: string): boolean {
+  const text = (content || '').trim();
+  if (!text) return false;
+  return /(进度|状态|task)/i.test(text);
+}
+
+function isForceRefreshIntent(content: string): boolean {
+  const text = (content || '').trim();
+  return /(强制刷新|重新拉数据|force\s*refresh)/i.test(text);
+}
+
+function quantCcAssetClass(symbol: string): 'A' | 'B' {
+  const aClass = new Set(['SPY', 'VOO', 'IVV', 'QQQ', 'QQQM', 'GLD', 'IAU', 'GDX', 'IBIT', 'TLT']);
+  return aClass.has((symbol || '').toUpperCase()) ? 'A' : 'B';
+}
+
+function quantCcBaseCandidates(): string[] {
+  const envBase = (process.env.QUANT_CC_BASE_URL || '').trim();
+  const bases = [
+    envBase,
+    'http://127.0.0.1:8001',
+    'http://localhost:8001',
+    'http://host.docker.internal:8001',
+  ].filter(Boolean);
+  return Array.from(new Set(bases));
+}
+
+async function quantCcFetchJson(path: string, init?: RequestInit): Promise<any> {
+  let lastErr: unknown = null;
+  for (const base of quantCcBaseCandidates()) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const resp = await fetch(`${base}${path}`, { ...(init || {}), signal: controller.signal });
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`http_${resp.status}:${text.slice(0, 200)}`);
+      return text ? JSON.parse(text) : {};
+    } catch (err) {
+      lastErr = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(`quant_cc_unreachable:${String(lastErr)}`);
+}
+
+async function handleQuantCcFastPath(
+  group: RegisteredGroup,
+  chatJid: string,
+  channel: Channel,
+  lastContent: string,
+  latestTimestamp: string,
+): Promise<boolean> {
+  if (group.folder !== 'quant_cc') return false;
+
+  const symbol = extractTicker(lastContent);
+  const taskBySymbol = (quantCcTaskMap[chatJid] ||= {});
+
+  if (isQuantCcProgressIntent(lastContent) && symbol) {
+    const taskId = taskBySymbol[symbol];
+    if (!taskId) {
+      lastAgentTimestamp[chatJid] = latestTimestamp;
+      saveState();
+      await channel.sendMessage(chatJid, `${symbol} 暂无进行中的任务记录。`);
+      return true;
+    }
+    try {
+      const body = await quantCcFetchJson(`/api/run_analysis_task?task_id=${taskId}`);
+      const task = body?.task || {};
+      const status = String(task.status || 'unknown');
+      if (status === 'succeeded') {
+        const recId = task?.result?.rec_id;
+        await channel.sendMessage(chatJid, `${symbol} 任务已完成（task_id=${taskId}${recId ? `, rec_id=${recId}` : ''}）。`);
+      } else if (status === 'failed') {
+        await channel.sendMessage(chatJid, `${symbol} 任务失败（task_id=${taskId}）：${task?.error || 'unknown'}`);
+      } else {
+        await channel.sendMessage(chatJid, `${symbol} 任务进行中（task_id=${taskId}, status=${status}）。`);
+      }
+    } catch (err) {
+      await channel.sendMessage(chatJid, `查询 ${symbol} 进度失败：${String(err)}`);
+    }
+    lastAgentTimestamp[chatJid] = latestTimestamp;
+    saveState();
+    return true;
+  }
+
+  if (!symbol || !isQuantCcAnalyzeIntent(lastContent)) return false;
+
+  const forceRefresh = isForceRefreshIntent(lastContent);
+  const assetClass = quantCcAssetClass(symbol);
+  try {
+    const submit = await quantCcFetchJson('/api/run_analysis_async', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, asset_class: assetClass, force_refresh: forceRefresh }),
+    });
+    const taskId = Number(submit?.task_id || 0);
+    if (!taskId) throw new Error('missing_task_id');
+    taskBySymbol[symbol] = taskId;
+
+    // Poll briefly for quick terminal state; otherwise keep it async.
+    let terminal: any = null;
+    for (let i = 0; i < 8; i += 1) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const body = await quantCcFetchJson(`/api/run_analysis_task?task_id=${taskId}`);
+      const task = body?.task || {};
+      const status = String(task.status || 'unknown');
+      if (status === 'succeeded' || status === 'failed') {
+        terminal = task;
+        break;
+      }
+    }
+
+    if (!terminal) {
+      // Keep async processing quiet to avoid duplicate in-progress notifications;
+      // Quant-CC itself already sends progress + final card to Telegram.
+    } else if (terminal.status === 'failed') {
+      await channel.sendMessage(chatJid, `${symbol} 分析失败（task_id=${taskId}）：${terminal.error || 'unknown'}`);
+    } else {
+      const result = terminal.result || {};
+      const suppress = Boolean(result.suppress_user_echo);
+      if (!suppress) {
+        const msg = String(result.message || `${symbol} 分析完成`).trim();
+        if (msg) await channel.sendMessage(chatJid, msg);
+      }
+    }
+  } catch (err) {
+    await channel.sendMessage(chatJid, `${symbol} 分析任务提交失败：${String(err)}`);
+  }
+
+  lastAgentTimestamp[chatJid] = latestTimestamp;
+  saveState();
+  return true;
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -201,6 +361,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
+  // Fast path: quant_cc analysis/progress API routing (bypass container agent)
+  try {
+    const handled = await handleQuantCcFastPath(
+      group,
+      chatJid,
+      channel,
+      lastContent,
+      missedMessages[missedMessages.length - 1].timestamp,
+    );
+    if (handled) return true;
+  } catch (err) {
+    logger.warn({ err, group: group.name }, 'quant_cc fast-path failed, fallback to container agent');
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
@@ -241,6 +415,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   await channel.setTyping?.(chatJid, true);
+  await channel.sendMessage(chatJid, '✅ 已收到，正在处理中，请稍候。');
   let hadError = false;
   let outputSentToUser = false;
 
@@ -261,8 +436,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        if (shouldSuppressQuantCcEcho(group, text)) {
+          logger.info({ group: group.name }, 'Suppressed redundant Quant-CC completion echo');
+        } else {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -912,12 +1091,34 @@ async function startMessageLoop(): Promise<void> {
               );
           } else {
             // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            const enqueueResult = queue.enqueueMessageCheck(chatJid);
+            if (
+              (enqueueResult === 'queued_active' ||
+                enqueueResult === 'queued_limit') &&
+              messagesToSend.length > 0
+            ) {
+              const newestTs =
+                messagesToSend[messagesToSend.length - 1].timestamp;
+              if (lastQueueAckTimestamp[chatJid] !== newestTs) {
+                lastQueueAckTimestamp[chatJid] = newestTs;
+                await channel.sendMessage(
+                  chatJid,
+                  '✅ 已收到，正在处理中，请稍候。',
+                );
+              }
+            }
           }
         }
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
+    }
+    const recovered = queue.recoverStuckGroups();
+    if (recovered > 0) {
+      logger.warn(
+        { recovered, timeoutMs: QUEUE_WAIT_TIMEOUT },
+        'Recovered stuck groups due to queue wait timeout',
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }

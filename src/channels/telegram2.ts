@@ -41,6 +41,56 @@ function formatCompactValue(value: unknown): string {
   return String(value);
 }
 
+function formatNumberTrimmed(value: unknown, digits = 2): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return Number.isInteger(num) ? String(num) : num.toFixed(digits);
+}
+
+function formatShortDate(value: unknown): string {
+  const text = String(value || '').trim();
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return text || '-';
+  return `${m[2]}-${m[3]}`;
+}
+
+function formatDte(value: unknown): string {
+  const text = String(value || '').trim();
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '-';
+  const y = Number(m[1]);
+  const mon = Number(m[2]);
+  const d = Number(m[3]);
+  const expiryUtc = Date.UTC(y, mon - 1, d);
+  const now = new Date();
+  const todayUtc = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  );
+  const diffDays = Math.max(0, Math.round((expiryUtc - todayUtc) / 86400000));
+  return `D${diffDays}`;
+}
+
+function formatMoney(value: unknown): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  const isInt = Number.isInteger(num);
+  const text = num.toLocaleString('en-US', {
+    minimumFractionDigits: isInt ? 0 : 2,
+    maximumFractionDigits: isInt ? 0 : 2,
+  });
+  return `$${text}`;
+}
+
+function formatSignedMoney(value: unknown): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  if (num > 0) return `+${formatMoney(num)}`;
+  if (num < 0) return `-${formatMoney(Math.abs(num))}`;
+  return '$0';
+}
+
 function previewText(text: string, maxLen = 180): string {
   const cleaned = text.replace(/\s+/g, ' ').trim();
   if (cleaned.length <= maxLen) return cleaned;
@@ -117,36 +167,74 @@ function formatRows(
 }
 
 function formatAccountSummary(data: QuantResponse): string {
-  const rows = Array.isArray(data) ? data : [];
-  const lines = formatRows(
-    rows as Array<Record<string, unknown>>,
-    [
-      ['account', '账户'],
-      ['cash', '现金'],
-      ['stock_value', '持仓市值'],
-      ['unrealized_pnl', '浮动盈亏'],
-      ['total', '合计'],
-    ],
-    10,
-  );
-  return ['📊 账户汇总', lines].join('\n');
+  const rows = (Array.isArray(data) ? data : []) as Array<Record<string, unknown>>;
+  if (!rows.length) return '📊 账户汇总｜暂无数据';
+
+  const lines: string[] = ['📊 账户汇总'];
+  for (const row of rows.slice(0, 10)) {
+    const account = formatCompactValue(row.account);
+    const total = formatMoney(row.total);
+    const cash = formatMoney(row.cash);
+    const stock = formatMoney(row.stock_value);
+    const cspUsed = formatMoney(row.csp_used);
+    const cspAvailable = formatMoney(row.csp_available_cash);
+    const realized = formatSignedMoney(row.realized_pnl);
+    const floating = formatSignedMoney(row.floating_pnl ?? row.unrealized_pnl);
+    const totalPnl = formatSignedMoney(row.total_pnl ?? row.unrealized_pnl);
+    lines.push(`\n👤 ${account}`);
+    lines.push('');
+    lines.push('🧾 资产');
+    lines.push(`总资产 ${total}`);
+    lines.push(`持仓市值 ${stock}`);
+    lines.push('');
+    lines.push('💵 现金与额度');
+    lines.push(`可用现金 ${cash}`);
+    lines.push(`CSP使用额度 ${cspUsed}`);
+    lines.push(`可开仓现金 ${cspAvailable}`);
+    lines.push('');
+    lines.push('📈 盈亏');
+    lines.push(`已实现盈亏 ${realized}`);
+    lines.push(`浮动盈亏 ${floating}`);
+    lines.push(`总盈亏 ${totalPnl}`);
+  }
+  return lines.join('\n');
 }
 
 function formatPositions(data: QuantResponse): string {
-  const rows = Array.isArray(data) ? data : [];
-  const lines = formatRows(
-    rows as Array<Record<string, unknown>>,
-    [
-      ['account', '账户'],
-      ['symbol', '标的'],
-      ['position_type', '类型'],
-      ['quantity', '数量'],
-      ['avg_strike', '均价'],
-      ['expiry_date', '到期'],
-    ],
-    10,
-  );
-  return ['📌 当前持仓', lines].join('\n');
+  const rows = (Array.isArray(data) ? data : []) as Array<Record<string, unknown>>;
+  if (!rows.length) return '📌 持仓｜暂无数据';
+
+  const account = String(rows[0]?.account || '默认账户');
+  const stocks = rows.filter((r) => String(r.position_type || '').toLowerCase() === 'stock');
+  const options = rows.filter((r) => String(r.position_type || '').toLowerCase() !== 'stock');
+
+  const lines: string[] = [`📌 持仓｜${account}`];
+
+  if (stocks.length) {
+    lines.push(`🟦 正股(${stocks.length})`);
+    for (const row of stocks) {
+      const symbol = formatCompactValue(row.symbol);
+      const qty = formatNumberTrimmed(row.quantity);
+      const cost = formatMoney(row.cost_basis);
+      lines.push(`• ${symbol} ×${qty}股 ×${cost}`);
+    }
+  }
+
+  if (options.length) {
+    lines.push(`🟧 期权(${options.length})`);
+    for (const row of options) {
+      const symbol = formatCompactValue(row.symbol);
+      const ptype = String(row.position_type || '').toUpperCase();
+      const qty = formatNumberTrimmed(row.quantity);
+      const strike = formatMoney(row.avg_strike);
+      const expiry = formatShortDate(row.expiry_date);
+      const dte = formatDte(row.expiry_date);
+      const sold = formatMoney(row.cost_basis ?? row.premium);
+      lines.push(`• ${symbol} ${ptype} ×${qty} ×行权${strike} ×${sold} ×${expiry}(${dte})`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 function formatTrades(data: QuantResponse): string {

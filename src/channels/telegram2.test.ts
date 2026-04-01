@@ -169,10 +169,14 @@ describe('telegram2 command router', () => {
 
     mockFetchJson([
       {
-        account: 'default',
+        account: '美股账户',
         cash: 12500.5,
         stock_value: 32000,
-        unrealized_pnl: 412.34,
+        floating_pnl: 412.34,
+        realized_pnl: 1888.66,
+        total_pnl: 2301.0,
+        csp_used: 7500.0,
+        csp_available_cash: 5000.5,
         total: 44500.5,
       },
     ]);
@@ -187,7 +191,15 @@ describe('telegram2 command router', () => {
     expect(ctx.reply).toHaveBeenCalledWith(
       expect.stringContaining('📊 账户汇总'),
     );
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('default'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('👤 美股账户'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('🧾 资产'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('💵 现金与额度'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('📈 盈亏'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('总资产 $44,500.50'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('CSP使用额度 $7,500'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('可开仓现金 $5,000.50'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('已实现盈亏 +$1,888.66'));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('总盈亏 +$2,301'));
   });
 
   it('/rec and /market use direct Quant-CC endpoints', async () => {
@@ -242,6 +254,16 @@ describe('telegram2 command router', () => {
         symbol: 'AAPL',
         position_type: 'stock',
         quantity: 100,
+        cost_basis: 180.5,
+      },
+      {
+        account: 'ibkr1',
+        symbol: 'AAPL',
+        position_type: 'csp',
+        quantity: 1,
+        avg_strike: 170,
+        expiry_date: '2026-04-24',
+        cost_basis: 4.35,
       },
     ]);
     const posCtx = { reply: vi.fn() };
@@ -251,7 +273,22 @@ describe('telegram2 command router', () => {
       expect.objectContaining({ signal: expect.any(Object) }),
     );
     expect(posCtx.reply).toHaveBeenCalledWith(
-      expect.stringContaining('📌 当前持仓'),
+      expect.stringContaining('📌 持仓｜'),
+    );
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('🟦 正股('),
+    );
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('×$180.50'),
+    );
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('🟧 期权('),
+    );
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('×行权$170'),
+    );
+    expect(posCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('(D'),
     );
 
     mockFetchJson([

@@ -167,7 +167,9 @@ function formatRows(
 }
 
 function formatAccountSummary(data: QuantResponse): string {
-  const rows = (Array.isArray(data) ? data : []) as Array<Record<string, unknown>>;
+  const rows = (Array.isArray(data) ? data : []) as Array<
+    Record<string, unknown>
+  >;
   if (!rows.length) return '📊 账户汇总｜暂无数据';
 
   const lines: string[] = ['📊 账户汇总'];
@@ -201,12 +203,18 @@ function formatAccountSummary(data: QuantResponse): string {
 }
 
 function formatPositions(data: QuantResponse): string {
-  const rows = (Array.isArray(data) ? data : []) as Array<Record<string, unknown>>;
+  const rows = (Array.isArray(data) ? data : []) as Array<
+    Record<string, unknown>
+  >;
   if (!rows.length) return '📌 持仓｜暂无数据';
 
   const account = String(rows[0]?.account || '默认账户');
-  const stocks = rows.filter((r) => String(r.position_type || '').toLowerCase() === 'stock');
-  const options = rows.filter((r) => String(r.position_type || '').toLowerCase() !== 'stock');
+  const stocks = rows.filter(
+    (r) => String(r.position_type || '').toLowerCase() === 'stock',
+  );
+  const options = rows.filter(
+    (r) => String(r.position_type || '').toLowerCase() !== 'stock',
+  );
 
   const lines: string[] = [`📌 持仓｜${account}`];
 
@@ -230,7 +238,9 @@ function formatPositions(data: QuantResponse): string {
       const expiry = formatShortDate(row.expiry_date);
       const dte = formatDte(row.expiry_date);
       const sold = formatMoney(row.cost_basis ?? row.premium);
-      lines.push(`• ${symbol} ${ptype} ×${qty} ×行权${strike} ×${sold} ×${expiry}(${dte})`);
+      lines.push(
+        `• ${symbol} ${ptype} ×${qty} ×行权${strike} ×${sold} ×${expiry}(${dte})`,
+      );
     }
   }
 

@@ -191,15 +191,29 @@ describe('telegram2 command router', () => {
     expect(ctx.reply).toHaveBeenCalledWith(
       expect.stringContaining('📊 账户汇总'),
     );
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('👤 美股账户'));
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('👤 美股账户'),
+    );
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('🧾 资产'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('💵 现金与额度'));
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('💵 现金与额度'),
+    );
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('📈 盈亏'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('总资产 $44,500.50'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('CSP使用额度 $7,500'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('可开仓现金 $5,000.50'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('已实现盈亏 +$1,888.66'));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('总盈亏 +$2,301'));
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('总资产 $44,500.50'),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('CSP使用额度 $7,500'),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('可开仓现金 $5,000.50'),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('已实现盈亏 +$1,888.66'),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('总盈亏 +$2,301'),
+    );
   });
 
   it('/rec and /market use direct Quant-CC endpoints', async () => {
@@ -287,9 +301,7 @@ describe('telegram2 command router', () => {
     expect(posCtx.reply).toHaveBeenCalledWith(
       expect.stringContaining('×行权$170'),
     );
-    expect(posCtx.reply).toHaveBeenCalledWith(
-      expect.stringContaining('(D'),
-    );
+    expect(posCtx.reply).toHaveBeenCalledWith(expect.stringContaining('(D'));
 
     mockFetchJson([
       {

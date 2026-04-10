@@ -125,6 +125,7 @@ describe('telegram2 command router', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     global.fetch = vi.fn();
+    process.env.QUANT_CC_ENGINE_ID = 'nanoclaw-main';
   });
 
   afterEach(() => {
@@ -231,7 +232,12 @@ describe('telegram2 command router', () => {
 
     expect(global.fetch).toHaveBeenCalledWith(
       'http://localhost:8001/api/latest_rec',
-      expect.objectContaining({ signal: expect.any(Object) }),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+        signal: expect.any(Object),
+      }),
     );
     expect(recCtx.reply).toHaveBeenCalledWith(
       expect.stringContaining('🤖 最新 AI 建议'),
@@ -366,7 +372,18 @@ describe('telegram2 command router', () => {
     expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
     expect(global.fetch).toHaveBeenCalledWith(
       'http://localhost:8001/api/handle_callback',
-      expect.objectContaining({ method: 'POST', signal: expect.any(Object) }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+        body: JSON.stringify({
+          data: 'rec_confirm:123',
+          engine_id: 'nanoclaw-main',
+        }),
+        signal: expect.any(Object),
+      }),
     );
     expect(ctx.reply).toHaveBeenCalledWith('已处理', { parse_mode: 'HTML' });
   });

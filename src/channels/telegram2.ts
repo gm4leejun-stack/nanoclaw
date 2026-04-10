@@ -97,6 +97,44 @@ function previewText(text: string, maxLen = 180): string {
   return `${cleaned.slice(0, maxLen - 1)}…`;
 }
 
+function quantCcEngineId(): string {
+  return (process.env.QUANT_CC_ENGINE_ID || 'nanoclaw-main').trim();
+}
+
+function isEngineScopedPath(path: string): boolean {
+  return path === '/api/latest_rec' || path === '/api/handle_callback';
+}
+
+function withEngineScopedInit(
+  path: string,
+  init: RequestInit = {},
+  payload?: Record<string, unknown>,
+): RequestInit {
+  if (!isEngineScopedPath(path)) return init;
+  const rawHeaders = init.headers;
+  const headers: Record<string, string> = Array.isArray(rawHeaders)
+    ? Object.fromEntries(rawHeaders)
+    : rawHeaders instanceof Headers
+      ? Object.fromEntries(rawHeaders.entries())
+      : { ...((rawHeaders as Record<string, string> | undefined) || {}) };
+  headers['X-Engine-Id'] = quantCcEngineId();
+  let body = init.body;
+  if (payload) {
+    body = JSON.stringify({
+      ...payload,
+      engine_id: quantCcEngineId(),
+    });
+    if (!headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+  }
+  return {
+    ...init,
+    headers,
+    body,
+  };
+}
+
 async function fetchQuantJson<T>(
   path: string,
   init: RequestInit = {},
@@ -104,8 +142,9 @@ async function fetchQuantJson<T>(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
+    const requestInit = withEngineScopedInit(path, init);
     const resp = await fetch(`${QUANT_API}${path}`, {
-      ...init,
+      ...requestInit,
       signal: controller.signal,
     });
     const text = await resp.text();
@@ -562,11 +601,14 @@ function quantCcCallbackHandler(bot: Bot): void {
       const result = await fetchQuantJson<{
         reply_text: string | null;
         reply_markup: Record<string, unknown> | null;
-      }>('/api/handle_callback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data }),
-      });
+      }>(
+        '/api/handle_callback',
+        withEngineScopedInit(
+          '/api/handle_callback',
+          { method: 'POST' },
+          { data },
+        ),
+      );
       if (result.reply_text) {
         const sendOpts: Record<string, unknown> = { parse_mode: 'HTML' };
         if (result.reply_markup) sendOpts.reply_markup = result.reply_markup;

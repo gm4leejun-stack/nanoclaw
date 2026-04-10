@@ -95,14 +95,18 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
-function shouldSuppressQuantCcEcho(group: RegisteredGroup, text: string): boolean {
+function shouldSuppressQuantCcEcho(
+  group: RegisteredGroup,
+  text: string,
+): boolean {
   if (group.folder !== 'quant_cc') return false;
   const cleaned = (text || '').trim();
   if (!cleaned) return false;
   // Suppress redundant completion ack; Quant-CC already pushes the real card.
-  return /^[A-Z0-9_.-]+\s+分析完成（rec_id=\d+）[，,]建议卡片已推送。?$/.test(cleaned);
+  return /^[A-Z0-9_.-]+\s+分析完成（rec_id=\d+）[，,]建议卡片已推送。?$/.test(
+    cleaned,
+  );
 }
-
 
 function extractTicker(content: string): string | null {
   const m = (content || '').toUpperCase().match(/\b[A-Z]{2,5}\b/g);
@@ -129,30 +133,93 @@ function isForceRefreshIntent(content: string): boolean {
 }
 
 function quantCcAssetClass(symbol: string): 'A' | 'B' {
-  const aClass = new Set(['SPY', 'VOO', 'IVV', 'QQQ', 'QQQM', 'GLD', 'IAU', 'GDX', 'IBIT', 'TLT']);
+  const aClass = new Set([
+    'SPY',
+    'VOO',
+    'IVV',
+    'QQQ',
+    'QQQM',
+    'GLD',
+    'IAU',
+    'GDX',
+    'IBIT',
+    'TLT',
+  ]);
   return aClass.has((symbol || '').toUpperCase()) ? 'A' : 'B';
 }
 
 function quantCcBaseCandidates(): string[] {
-  const envBase = (process.env.QUANT_CC_BASE_URL || '').trim();
-  const bases = [
-    envBase,
-    'http://127.0.0.1:8001',
-    'http://localhost:8001',
-    'http://host.docker.internal:8001',
-  ].filter(Boolean);
-  return Array.from(new Set(bases));
+  const envBase = (
+    process.env.QUANT_CC_BASE_URL ||
+    process.env.QUANT_CC_API ||
+    'http://localhost:8001'
+  ).trim();
+  return envBase ? [envBase] : ['http://localhost:8001'];
 }
 
-async function quantCcFetchJson(path: string, init?: RequestInit): Promise<any> {
+function quantCcEngineId(): string {
+  return (process.env.QUANT_CC_ENGINE_ID || 'nanoclaw-main').trim();
+}
+
+function quantCcIsEngineScopedPath(path: string): boolean {
+  return (
+    path.startsWith('/api/run_analysis_async') ||
+    path.startsWith('/api/run_analysis_task') ||
+    path.startsWith('/api/run_analysis_tasks/')
+  );
+}
+
+function quantCcRequestInit(
+  path: string,
+  init: RequestInit = {},
+  payload?: Record<string, unknown>,
+): RequestInit {
+  const rawHeaders = init.headers;
+  const headers: Record<string, string> = Array.isArray(rawHeaders)
+    ? Object.fromEntries(rawHeaders)
+    : rawHeaders instanceof Headers
+      ? Object.fromEntries(rawHeaders.entries())
+      : { ...((rawHeaders as Record<string, string> | undefined) || {}) };
+  let body = init.body;
+  if (quantCcIsEngineScopedPath(path)) {
+    headers['X-Engine-Id'] = quantCcEngineId();
+    if (payload) {
+      body = JSON.stringify({
+        ...payload,
+        engine_id: quantCcEngineId(),
+      });
+      if (!headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
+    }
+  }
+  return {
+    ...init,
+    headers,
+    body,
+  };
+}
+
+async function quantCcFetchJson(
+  path: string,
+  init?: RequestInit,
+): Promise<any> {
   let lastErr: unknown = null;
+  let firstHttpErr: unknown = null;
   for (const base of quantCcBaseCandidates()) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
     try {
-      const resp = await fetch(`${base}${path}`, { ...(init || {}), signal: controller.signal });
+      const resp = await fetch(`${base}${path}`, {
+        ...(init || {}),
+        signal: controller.signal,
+      });
       const text = await resp.text();
-      if (!resp.ok) throw new Error(`http_${resp.status}:${text.slice(0, 200)}`);
+      if (!resp.ok) {
+        const err = new Error(`http_${resp.status}:${text.slice(0, 200)}`);
+        firstHttpErr ??= err;
+        throw err;
+      }
       return text ? JSON.parse(text) : {};
     } catch (err) {
       lastErr = err;
@@ -160,7 +227,43 @@ async function quantCcFetchJson(path: string, init?: RequestInit): Promise<any> 
       clearTimeout(timer);
     }
   }
+  if (firstHttpErr) throw firstHttpErr;
   throw new Error(`quant_cc_unreachable:${String(lastErr)}`);
+}
+
+async function submitQuantCcAnalysis(params: {
+  symbol: string;
+  assetClass: 'A' | 'B';
+  forceRefresh: boolean;
+}): Promise<any> {
+  const payload = {
+    symbol: params.symbol,
+    asset_class: params.assetClass,
+    force_refresh: params.forceRefresh,
+  };
+  return quantCcFetchJson(
+    '/api/run_analysis_async',
+    quantCcRequestInit(
+      '/api/run_analysis_async',
+      { method: 'POST' },
+      payload,
+    ),
+  );
+}
+
+async function maybePollQuantCcTask(taskId: number): Promise<any | null> {
+  try {
+    return await quantCcFetchJson(
+      `/api/run_analysis_task?task_id=${taskId}`,
+      quantCcRequestInit(`/api/run_analysis_task?task_id=${taskId}`),
+    );
+  } catch (err) {
+    logger.warn(
+      { taskId, error: err, quantCcBases: quantCcBaseCandidates() },
+      'Quant-CC task poll failed after successful submission',
+    );
+    return null;
+  }
 }
 
 async function handleQuantCcFastPath(
@@ -184,19 +287,33 @@ async function handleQuantCcFastPath(
       return true;
     }
     try {
-      const body = await quantCcFetchJson(`/api/run_analysis_task?task_id=${taskId}`);
+      const body = await quantCcFetchJson(
+        `/api/run_analysis_task?task_id=${taskId}`,
+      );
       const task = body?.task || {};
       const status = String(task.status || 'unknown');
       if (status === 'succeeded') {
         const recId = task?.result?.rec_id;
-        await channel.sendMessage(chatJid, `${symbol} 任务已完成（task_id=${taskId}${recId ? `, rec_id=${recId}` : ''}）。`);
+        await channel.sendMessage(
+          chatJid,
+          `${symbol} 任务已完成（task_id=${taskId}${recId ? `, rec_id=${recId}` : ''}）。`,
+        );
       } else if (status === 'failed') {
-        await channel.sendMessage(chatJid, `${symbol} 任务失败（task_id=${taskId}）：${task?.error || 'unknown'}`);
+        await channel.sendMessage(
+          chatJid,
+          `${symbol} 任务失败（task_id=${taskId}）：${task?.error || 'unknown'}`,
+        );
       } else {
-        await channel.sendMessage(chatJid, `${symbol} 任务进行中（task_id=${taskId}, status=${status}）。`);
+        await channel.sendMessage(
+          chatJid,
+          `${symbol} 任务进行中（task_id=${taskId}, status=${status}）。`,
+        );
       }
     } catch (err) {
-      await channel.sendMessage(chatJid, `查询 ${symbol} 进度失败：${String(err)}`);
+      await channel.sendMessage(
+        chatJid,
+        `查询 ${symbol} 进度失败：${String(err)}`,
+      );
     }
     lastAgentTimestamp[chatJid] = latestTimestamp;
     saveState();
@@ -208,10 +325,10 @@ async function handleQuantCcFastPath(
   const forceRefresh = isForceRefreshIntent(lastContent);
   const assetClass = quantCcAssetClass(symbol);
   try {
-    const submit = await quantCcFetchJson('/api/run_analysis_async', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, asset_class: assetClass, force_refresh: forceRefresh }),
+    const submit = await submitQuantCcAnalysis({
+      symbol,
+      assetClass,
+      forceRefresh,
     });
     const taskId = Number(submit?.task_id || 0);
     if (!taskId) throw new Error('missing_task_id');
@@ -221,7 +338,8 @@ async function handleQuantCcFastPath(
     let terminal: any = null;
     for (let i = 0; i < 8; i += 1) {
       await new Promise((r) => setTimeout(r, 3000));
-      const body = await quantCcFetchJson(`/api/run_analysis_task?task_id=${taskId}`);
+      const body = await maybePollQuantCcTask(taskId);
+      if (!body) break;
       const task = body?.task || {};
       const status = String(task.status || 'unknown');
       if (status === 'succeeded' || status === 'failed') {
@@ -234,7 +352,10 @@ async function handleQuantCcFastPath(
       // Keep async processing quiet to avoid duplicate in-progress notifications;
       // Quant-CC itself already sends progress + final card to Telegram.
     } else if (terminal.status === 'failed') {
-      await channel.sendMessage(chatJid, `${symbol} 分析失败（task_id=${taskId}）：${terminal.error || 'unknown'}`);
+      await channel.sendMessage(
+        chatJid,
+        `${symbol} 分析失败（task_id=${taskId}）：${terminal.error || 'unknown'}`,
+      );
     } else {
       const result = terminal.result || {};
       const suppress = Boolean(result.suppress_user_echo);
@@ -244,7 +365,21 @@ async function handleQuantCcFastPath(
       }
     }
   } catch (err) {
-    await channel.sendMessage(chatJid, `${symbol} 分析任务提交失败：${String(err)}`);
+    logger.error(
+      {
+        error: err,
+        symbol,
+        assetClass,
+        forceRefresh,
+        quantCcBases: quantCcBaseCandidates(),
+        engineId: quantCcEngineId(),
+      },
+      'Quant-CC fast path analysis submission failed',
+    );
+    await channel.sendMessage(
+      chatJid,
+      `${symbol} 分析任务提交失败：${String(err)}`,
+    );
   }
 
   lastAgentTimestamp[chatJid] = latestTimestamp;
@@ -372,7 +507,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
     if (handled) return true;
   } catch (err) {
-    logger.warn({ err, group: group.name }, 'quant_cc fast-path failed, fallback to container agent');
+    logger.warn(
+      { err, group: group.name },
+      'quant_cc fast-path failed, fallback to container agent',
+    );
   }
 
   // For non-main groups, check if trigger is required and present
@@ -437,7 +575,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         if (shouldSuppressQuantCcEcho(group, text)) {
-          logger.info({ group: group.name }, 'Suppressed redundant Quant-CC completion echo');
+          logger.info(
+            { group: group.name },
+            'Suppressed redundant Quant-CC completion echo',
+          );
         } else {
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
@@ -1439,3 +1580,12 @@ if (isDirectRun) {
     process.exit(1);
   });
 }
+
+export const __test__ = {
+  quantCcBaseCandidates,
+  quantCcEngineId,
+  quantCcRequestInit,
+  quantCcFetchJson,
+  submitQuantCcAnalysis,
+  maybePollQuantCcTask,
+};

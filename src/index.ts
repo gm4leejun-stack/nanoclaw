@@ -266,8 +266,36 @@ async function maybePollQuantCcTask(taskId: number): Promise<any | null> {
 type QuantCcEngineEvent = {
   id: number;
   status?: string | null;
-  payload?: { task_id?: number; status?: string | null } & Record<string, unknown>;
+  payload?: { task_id?: number; status?: string | null } & Record<
+    string,
+    unknown
+  >;
 };
+
+function extractQuantCcEventMessage(
+  symbol: string,
+  taskId: number,
+  event: QuantCcEngineEvent | null,
+): string {
+  const payload = event?.payload || {};
+  const rawResult = payload.result_json;
+  let parsedResult: Record<string, unknown> | null = null;
+
+  if (typeof rawResult === 'string' && rawResult.trim()) {
+    try {
+      parsedResult = JSON.parse(rawResult) as Record<string, unknown>;
+    } catch {
+      parsedResult = null;
+    }
+  } else if (rawResult && typeof rawResult === 'object') {
+    parsedResult = rawResult as Record<string, unknown>;
+  }
+
+  const eventMessage = String(parsedResult?.message || '').trim();
+  if (eventMessage) return eventMessage;
+
+  return `${symbol} 分析完成（task_id=${taskId}）。`;
+}
 
 async function waitForQuantCcEngineEvent(
   taskId: number,
@@ -289,11 +317,13 @@ async function waitForQuantCcEngineEvent(
     }
     const body = await quantCcFetchJson(
       `/api/engine_events?after_id=${afterId}&limit=${limit}`,
-      quantCcRequestInit(`/api/engine_events?after_id=${afterId}&limit=${limit}`),
+      quantCcRequestInit(
+        `/api/engine_events?after_id=${afterId}&limit=${limit}`,
+      ),
     );
     const events = Array.isArray(body?.events) ? body.events : [];
     const match = events.find(
-      (event) => Number(event?.payload?.task_id || 0) === Number(taskId),
+      (event: QuantCcEngineEvent) => Number(event?.payload?.task_id || 0) === Number(taskId),
     );
     if (match) {
       return match as QuantCcEngineEvent;
@@ -308,7 +338,9 @@ async function ackQuantCcEngineEvent(eventId: number): Promise<boolean> {
   try {
     const body = await quantCcFetchJson(
       `/api/engine_events/${eventId}/ack`,
-      quantCcRequestInit(`/api/engine_events/${eventId}/ack`, { method: 'POST' }),
+      quantCcRequestInit(`/api/engine_events/${eventId}/ack`, {
+        method: 'POST',
+      }),
     );
     return Boolean(body?.ok);
   } catch (err) {
@@ -403,6 +435,7 @@ async function handleQuantCcFastPath(
     }
 
     let deliveryEvent: QuantCcEngineEvent | null = null;
+    let delivered = false;
     if (!terminal) {
       deliveryEvent = await waitForQuantCcEngineEvent(taskId);
       if (deliveryEvent) {
@@ -415,7 +448,6 @@ async function handleQuantCcFastPath(
       }
     }
 
-    let delivered = false;
     if (!terminal) {
       // Keep the request async when Quant-CC has not reached a terminal state yet.
     } else if (terminal.status === 'failed') {
@@ -425,10 +457,12 @@ async function handleQuantCcFastPath(
       );
       delivered = true;
     } else {
-      const result = terminal.result || {};
-      const suppress = Boolean(result.suppress_user_echo);
-      if (!suppress) {
-        const msg = String(result.message || `${symbol} 分析完成`).trim();
+      deliveryEvent ||= await waitForQuantCcEngineEvent(taskId, {
+        attempts: 2,
+        intervalMs: 1000,
+      });
+      if (deliveryEvent) {
+        const msg = extractQuantCcEventMessage(symbol, taskId, deliveryEvent);
         if (msg) {
           await channel.sendMessage(chatJid, msg);
           delivered = true;
@@ -437,10 +471,6 @@ async function handleQuantCcFastPath(
     }
 
     if (delivered) {
-      deliveryEvent ||= await waitForQuantCcEngineEvent(taskId, {
-        attempts: 2,
-        intervalMs: 1000,
-      });
       if (deliveryEvent?.id) {
         await ackQuantCcEngineEvent(Number(deliveryEvent.id));
       }
@@ -1671,4 +1701,5 @@ export const __test__ = {
   maybePollQuantCcTask,
   waitForQuantCcEngineEvent,
   ackQuantCcEngineEvent,
+  handleQuantCcFastPath,
 };

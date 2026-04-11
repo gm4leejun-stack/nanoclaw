@@ -165,7 +165,8 @@ function quantCcIsEngineScopedPath(path: string): boolean {
   return (
     path.startsWith('/api/run_analysis_async') ||
     path.startsWith('/api/run_analysis_task') ||
-    path.startsWith('/api/run_analysis_tasks/')
+    path.startsWith('/api/run_analysis_tasks/') ||
+    path.startsWith('/api/engine_events')
   );
 }
 
@@ -243,11 +244,7 @@ async function submitQuantCcAnalysis(params: {
   };
   return quantCcFetchJson(
     '/api/run_analysis_async',
-    quantCcRequestInit(
-      '/api/run_analysis_async',
-      { method: 'POST' },
-      payload,
-    ),
+    quantCcRequestInit('/api/run_analysis_async', { method: 'POST' }, payload),
   );
 }
 
@@ -263,6 +260,63 @@ async function maybePollQuantCcTask(taskId: number): Promise<any | null> {
       'Quant-CC task poll failed after successful submission',
     );
     return null;
+  }
+}
+
+type QuantCcEngineEvent = {
+  id: number;
+  status?: string | null;
+  payload?: { task_id?: number; status?: string | null } & Record<string, unknown>;
+};
+
+async function waitForQuantCcEngineEvent(
+  taskId: number,
+  options: {
+    afterId?: number;
+    attempts?: number;
+    intervalMs?: number;
+    limit?: number;
+  } = {},
+): Promise<QuantCcEngineEvent | null> {
+  let afterId = Math.max(0, Number(options.afterId || 0));
+  const attempts = Math.max(1, Number(options.attempts || 8));
+  const intervalMs = Math.max(0, Number(options.intervalMs ?? 3000));
+  const limit = Math.max(1, Number(options.limit || 100));
+
+  for (let i = 0; i < attempts; i += 1) {
+    if (i > 0 && intervalMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    const body = await quantCcFetchJson(
+      `/api/engine_events?after_id=${afterId}&limit=${limit}`,
+      quantCcRequestInit(`/api/engine_events?after_id=${afterId}&limit=${limit}`),
+    );
+    const events = Array.isArray(body?.events) ? body.events : [];
+    const match = events.find(
+      (event) => Number(event?.payload?.task_id || 0) === Number(taskId),
+    );
+    if (match) {
+      return match as QuantCcEngineEvent;
+    }
+    afterId = Math.max(afterId, Number(body?.next_after_id || afterId));
+  }
+
+  return null;
+}
+
+async function ackQuantCcEngineEvent(eventId: number): Promise<boolean> {
+  try {
+    const body = await quantCcFetchJson(
+      `/api/engine_events/${eventId}/ack`,
+      quantCcRequestInit(`/api/engine_events/${eventId}/ack`, { method: 'POST' }),
+    );
+    return Boolean(body?.ok);
+  } catch (err) {
+    logger.warn(
+      { eventId, error: err, quantCcBases: quantCcBaseCandidates() },
+      'Quant-CC engine event ack failed',
+    );
+    return false;
   }
 }
 
@@ -348,20 +402,47 @@ async function handleQuantCcFastPath(
       }
     }
 
+    let deliveryEvent: QuantCcEngineEvent | null = null;
     if (!terminal) {
-      // Keep async processing quiet to avoid duplicate in-progress notifications;
-      // Quant-CC itself already sends progress + final card to Telegram.
+      deliveryEvent = await waitForQuantCcEngineEvent(taskId);
+      if (deliveryEvent) {
+        const body = await maybePollQuantCcTask(taskId);
+        const task = body?.task || {};
+        const status = String(task.status || 'unknown');
+        if (status === 'succeeded' || status === 'failed') {
+          terminal = task;
+        }
+      }
+    }
+
+    let delivered = false;
+    if (!terminal) {
+      // Keep the request async when Quant-CC has not reached a terminal state yet.
     } else if (terminal.status === 'failed') {
       await channel.sendMessage(
         chatJid,
         `${symbol} 分析失败（task_id=${taskId}）：${terminal.error || 'unknown'}`,
       );
+      delivered = true;
     } else {
       const result = terminal.result || {};
       const suppress = Boolean(result.suppress_user_echo);
       if (!suppress) {
         const msg = String(result.message || `${symbol} 分析完成`).trim();
-        if (msg) await channel.sendMessage(chatJid, msg);
+        if (msg) {
+          await channel.sendMessage(chatJid, msg);
+          delivered = true;
+        }
+      }
+    }
+
+    if (delivered) {
+      deliveryEvent ||= await waitForQuantCcEngineEvent(taskId, {
+        attempts: 2,
+        intervalMs: 1000,
+      });
+      if (deliveryEvent?.id) {
+        await ackQuantCcEngineEvent(Number(deliveryEvent.id));
       }
     }
   } catch (err) {
@@ -1588,4 +1669,6 @@ export const __test__ = {
   quantCcFetchJson,
   submitQuantCcAnalysis,
   maybePollQuantCcTask,
+  waitForQuantCcEngineEvent,
+  ackQuantCcEngineEvent,
 };

@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  __test__,
-} from './index.js';
+import { __test__ } from './index.js';
 
 describe('Quant-CC multi-engine client contract', () => {
   beforeEach(() => {
@@ -24,9 +22,11 @@ describe('Quant-CC multi-engine client contract', () => {
       .mockResolvedValue({
         ok: true,
         status: 200,
-        text: vi.fn().mockResolvedValue(
-          JSON.stringify({ task: { status: 'succeeded', result: {} } }),
-        ),
+        text: vi
+          .fn()
+          .mockResolvedValue(
+            JSON.stringify({ task: { status: 'succeeded', result: {} } }),
+          ),
       } as any);
 
     await __test__.submitQuantCcAnalysis({
@@ -62,13 +62,15 @@ describe('Quant-CC multi-engine client contract', () => {
       .mockResolvedValueOnce({
         ok: false,
         status: 400,
-        text: vi.fn().mockResolvedValue(JSON.stringify({ detail: 'missing engine_id' })),
+        text: vi
+          .fn()
+          .mockResolvedValue(JSON.stringify({ detail: 'missing engine_id' })),
       } as any)
       .mockRejectedValueOnce(new TypeError('fetch failed'));
 
-    await expect(__test__.quantCcFetchJson('/api/run_analysis_async')).rejects.toThrow(
-      /http_400:.*missing engine_id/i,
-    );
+    await expect(
+      __test__.quantCcFetchJson('/api/run_analysis_async'),
+    ).rejects.toThrow(/http_400:.*missing engine_id/i);
   });
 
   it('uses a single explicit local Quant-CC base URL by default', () => {
@@ -80,5 +82,92 @@ describe('Quant-CC multi-engine client contract', () => {
     global.fetch = vi.fn().mockRejectedValueOnce(new TypeError('fetch failed'));
 
     await expect(__test__.maybePollQuantCcTask(321)).resolves.toBeNull();
+  });
+
+  it('adds engine header to engine event feed and ack requests', async () => {
+    process.env.QUANT_CC_ENGINE_ID = 'nanoclaw-main';
+
+    expect(__test__.quantCcRequestInit('/api/engine_events?after_id=0&limit=5')).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+      }),
+    );
+
+    expect(__test__.quantCcRequestInit('/api/engine_events/17/ack', { method: 'POST' })).toEqual(
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+      }),
+    );
+  });
+
+  it('waits for a matching engine result event and acks it', async () => {
+    process.env.QUANT_CC_ENGINE_ID = 'nanoclaw-main';
+    process.env.QUANT_CC_BASE_URL = 'http://localhost:8001';
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: vi.fn().mockResolvedValue(
+          JSON.stringify({
+            ok: true,
+            events: [
+              {
+                id: 17,
+                event_type: 'analysis_result_ready',
+                status: 'succeeded',
+                payload: { task_id: 123, status: 'succeeded' },
+              },
+            ],
+            next_after_id: 17,
+          }),
+        ),
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: vi.fn().mockResolvedValue(JSON.stringify({ ok: true, acked: true })),
+      } as any);
+
+    const event = await __test__.waitForQuantCcEngineEvent(123, {
+      attempts: 1,
+      intervalMs: 0,
+      limit: 5,
+    });
+    const acked = await __test__.ackQuantCcEngineEvent(17);
+
+    expect(event).toEqual(
+      expect.objectContaining({
+        id: 17,
+        payload: expect.objectContaining({ task_id: 123 }),
+      }),
+    );
+    expect(acked).toBe(true);
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:8001/api/engine_events?after_id=0&limit=5',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+        signal: expect.any(Object),
+      }),
+    );
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:8001/api/engine_events/17/ack',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-Engine-Id': 'nanoclaw-main',
+        }),
+        signal: expect.any(Object),
+      }),
+    );
   });
 });
